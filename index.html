@@ -143,6 +143,8 @@
   .spark{width:100%;height:66px;display:block}
   .spark polyline{fill:none;stroke:var(--brass);stroke-width:2;vector-effect:non-scaling-stroke}
   .spark .area{fill:rgba(201,162,75,.13);stroke:none}
+  .linkbtn{background:none;border:none;color:var(--green-700);font-weight:700;font-family:inherit;font-size:12px;cursor:pointer;padding:0;text-decoration:underline}
+  .linkbtn:disabled{color:var(--ink-soft);text-decoration:none;opacity:.6}
 
   /* log */
   .log{font-size:12.5px;line-height:1.5}
@@ -214,6 +216,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="betrieb"><span class="ic">🏭</span><span class="tl">Betrieb</span></button>
     <button class="tab" data-tab="markt"><span class="ic">📈</span><span class="tl">Markt</span></button>
+    <button class="tab" data-tab="labor"><span class="ic">🔬</span><span class="tl">Labor</span></button>
     <button class="tab" data-tab="konzern"><span class="ic">📊</span><span class="tl">Konzern</span></button>
   </div>
 
@@ -224,13 +227,13 @@
 <script>
 /* ============ KONFIGURATION ============ */
 const GOODS = {
-  weizen:   {name:"Weizen",   base:3,  ico:"🌾"},
-  milch:    {name:"Milch",    base:5,  ico:"🥛"},
-  stoff:    {name:"Stoff",    base:6,  ico:"🧵"},
-  mehl:     {name:"Mehl",     base:9,  ico:"🌾"},
-  brot:     {name:"Brot",     base:28, ico:"🍞"},
-  kaese:    {name:"Käse",     base:22, ico:"🧀"},
-  kleidung: {name:"Kleidung", base:35, ico:"👕"},
+  weizen:   {name:"Weizen",   base:3,  ico:"🌾", demand:16},
+  milch:    {name:"Milch",    base:5,  ico:"🥛", demand:13},
+  stoff:    {name:"Stoff",    base:6,  ico:"🧵", demand:13},
+  mehl:     {name:"Mehl",     base:9,  ico:"🌾", demand:11},
+  brot:     {name:"Brot",     base:28, ico:"🍞", demand:8},
+  kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7},
+  kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6},
 };
 
 const BUILDINGS = {
@@ -263,6 +266,7 @@ function freshState(name){
     log: [{day:1, t:"Kontor eröffnet. Baue deinen ersten Betrieb.", c:""}],
     won:false, bankrupt:false, cashHist:[5000],
     debt:0, auto:{}, netHist:[],
+    sell:{}, q:{}, research:null,
   };
 }
 
@@ -273,6 +277,12 @@ const eur = n => fmt(n)+" €";
 function level(){ let l=1; for(let i=1;i<LEVELS.length;i++) if(S.xp>=LEVELS[i]) l=i+1; return l; }
 function capacity(){ return CAP_BASE + (level()-1)*CAP_PER_LEVEL; }
 function avgProfit(){ const h=S.cashHist; if(h.length<2) return 0; return (h[h.length-1]-h[0])/(h.length-1); }
+function quality(g){ return S.q[g]||0; }
+function effRef(g){ return S.prices[g]*(1+0.12*quality(g)); }            // Q hebt den erzielbaren Preis
+function ensureOffer(g){ if(!S.sell[g]) S.sell[g]={price:Math.max(1,Math.round(effRef(g))), on:true}; return S.sell[g]; }
+function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(GOODS[g].demand*Math.min(4, r*r)); }
+function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, quality(g))); }
+function researchTime(g){ return Math.round(18*Math.pow(1.6, quality(g))); }  // in Tagen/Ticks
 function buildCost(id){ const owned=S.buildings[id]||0; return Math.round(BUILDINGS[id].cost*Math.pow(1.6,owned)); }
 function netWorth(){
   let n = S.cash + S.totalInvested*0.5 - (S.debt||0);
@@ -324,25 +334,26 @@ function tick(){
   S.cash -= upkeepTotal;
   if(overflow && S.day%6===0) addLog("Lager voll — Überschuss verfällt. Verkaufen oder Stufe steigen.","bad");
 
-  // Marktbewegung: schwache Rückkehr zum Mittel, kräftiges Rauschen → stärkere Schwankungen
-  for(const g in GOODS){
-    const base=GOODS[g].base; let p=S.prices[g];
-    p += (base-p)*0.022 + base*0.10*(Math.random()*2-1);
-    S.prices[g] = Math.max(base*0.25, Math.min(base*3.2, p));
+  // Einzelhandelsverkauf nach Nachfrage-Elastizität + endogene Referenzpreise
+  retailTick();
+
+  // Zufallsereignisse (Nachfrageschocks auf den Referenzpreis)
+  if(Math.random()<0.07){
+    const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
+    if(Math.random()<0.5){ S.prices[g]*=1.7;  addLog(`Nachfrageschub: ${GOODS[g].name} im Höhenflug.`,"good"); toast(`📈 ${GOODS[g].name} stark gefragt`);}
+    else{ S.prices[g]*=0.55; addLog(`Marktschwemme: ${GOODS[g].name} bricht ein.`,"bad");  toast(`📉 ${GOODS[g].name} eingebrochen`);}
+    S.prices[g]=Math.max(GOODS[g].base*0.3,Math.min(GOODS[g].base*3.0,S.prices[g]));
   }
 
-  // Zufallsereignisse: häufiger und heftiger
-  if(Math.random()<0.08){
-    const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
-    if(Math.random()<0.5){ S.prices[g]*=1.9;  addLog(`Nachfrageschub: ${GOODS[g].name} im Höhenflug.`,"good"); toast(`📈 ${GOODS[g].name} +90%`);}
-    else{ S.prices[g]*=0.45; addLog(`Marktschwemme: ${GOODS[g].name} bricht ein.`,"bad");  toast(`📉 ${GOODS[g].name} −55%`);}
-    S.prices[g]=Math.max(GOODS[g].base*0.25,Math.min(GOODS[g].base*3.2,S.prices[g]));
+  // Forschung abschließen
+  if(S.research && S.day>=S.research.endDay){
+    const g=S.research.good; S.q[g]=quality(g)+1;
+    addLog(`Forschung abgeschlossen: ${GOODS[g].name} jetzt Q${S.q[g]}.`,"good"); toast(`🔬 ${GOODS[g].name} Q${S.q[g]}`);
+    S.research=null;
   }
 
   // Kreditzinsen
   if(S.debt>0) S.debt += S.debt*0.0015;
-  // Auto-Verkauf bei erreichtem Limit
-  autoSellTick();
 
   // Insolvenz (Konzernwert tief negativ)
   if(netWorth() < -15000 && !S.bankrupt){ S.bankrupt=true; S.running=false; clearInterval(loop); showOverlay("Insolvenz","Dein Konzern ist überschuldet. Die Gläubiger übernehmen das Ruder.","Neu gründen",()=>newGame()); }
@@ -354,15 +365,26 @@ function tick(){
   persist();
   render();
 }
-function autoSellTick(){
+function retailTick(){
   for(const g in GOODS){
-    const a=S.auto[g]; const have=S.warehouse[g]||0;
-    if(a && a.on && have>0 && S.prices[g]>=a.limit){
-      const net=have*S.prices[g]*0.9;
-      S.warehouse[g]=0; S.cash+=net; S.xp+=net;
-      S.prices[g]*=(1-Math.min(0.18,0.0009*have));
-      S.prices[g]=Math.max(GOODS[g].base*0.4,S.prices[g]);
+    const base=GOODS[g].base;
+    let have=S.warehouse[g]||0;
+    let off=S.sell[g];
+    if(!off && have>0) off=ensureOffer(g);   // neue Ware automatisch zum Verkauf anbieten
+    let soldVol=0;
+    if(off && off.on && have>0){
+      const want=predictSales(g, off.price);
+      const sold=Math.min(want, have);
+      if(sold>0){
+        const rev=sold*off.price*0.9;        // 10 % Marktgebühr
+        S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; soldVol=sold;
+      }
     }
+    // Endogener Referenzpreis: Überangebot drückt, Knappheit hebt
+    let p=S.prices[g];
+    const pressure=(soldVol - GOODS[g].demand)*(base*0.004);
+    p += (base-p)*0.03 - pressure + base*0.015*(Math.random()*2-1);
+    S.prices[g]=Math.max(base*0.3, Math.min(base*3.0, p));
   }
 }
 
@@ -376,23 +398,11 @@ function build(id){
   addLog(`${BUILDINGS[id].name} gebaut (${eur(cost)}).`,"");
   render(); persist();
 }
-function sell(g, amt){
-  const have=S.warehouse[g]||0; if(have<=0){ toast("Lager leer."); return; }
-  const qty = amt==='all'?have:Math.min(amt,have);
-  const gross = qty*S.prices[g];
-  const net = gross*0.9; // 10% Marktgebühr (wie im Original)
-  S.warehouse[g]-=qty; S.cash+=net; S.xp+=net;
-  S.prices[g]*=(1-Math.min(0.18,0.0009*qty)); // Verkaufsdruck senkt Preis
-  S.prices[g]=Math.max(GOODS[g].base*0.4,S.prices[g]);
-  toast(`+${eur(net)} (${qty}× ${GOODS[g].name})`);
-  render(); persist();
-}
 function buy(g, qty){
-  const cost = qty*S.prices[g];
+  const cost = qty*S.prices[g]*1.05; // Einkauf mit kleinem Aufschlag (Spread)
   if(S.cash<cost){ toast("Nicht genug Kapital."); return; }
   S.cash-=cost; S.warehouse[g]=(S.warehouse[g]||0)+qty;
-  S.prices[g]*=(1+Math.min(0.15,0.0008*qty));
-  S.prices[g]=Math.min(GOODS[g].base*2.3,S.prices[g]);
+  S.prices[g]=Math.min(GOODS[g].base*3.0, S.prices[g]*(1+Math.min(0.12,0.0006*qty)));
   toast(`−${eur(cost)} (${qty}× ${GOODS[g].name})`);
   render(); persist();
 }
@@ -411,15 +421,15 @@ function repayLoan(amt){
   addLog(`Kredit getilgt: ${eur(amt)}.`,"");
   render(); persist();
 }
-function toggleAuto(g){
-  if(!S.auto[g]) S.auto[g]={on:false, limit:Math.round(GOODS[g].base*1.4)};
-  S.auto[g].on=!S.auto[g].on;
-  render(); persist();
-}
-function adjAuto(g,dir){
-  if(!S.auto[g]) S.auto[g]={on:false, limit:Math.round(GOODS[g].base*1.4)};
-  const step=Math.max(1,Math.round(GOODS[g].base*0.1));
-  S.auto[g].limit=Math.max(1, S.auto[g].limit+dir*step);
+function toggleOffer(g){ const o=ensureOffer(g); o.on=!o.on; render(); persist(); }
+function adjPrice(g,dir){ const o=ensureOffer(g); const step=Math.max(1,Math.round(GOODS[g].base*0.05)); o.price=Math.max(1, o.price+dir*step); render(); persist(); }
+function resetPrice(g){ const o=ensureOffer(g); o.price=Math.max(1,Math.round(effRef(g))); render(); persist(); }
+function startResearch(g){
+  if(S.research){ toast("Es läuft bereits eine Forschung."); return; }
+  const c=researchCost(g);
+  if(S.cash<c){ toast("Nicht genug Kapital."); return; }
+  S.cash-=c; S.research={good:g, endDay:S.day+researchTime(g), total:researchTime(g), startDay:S.day};
+  addLog(`Forschung gestartet: ${GOODS[g].name} → Q${quality(g)+1} (${eur(c)}).`,"");
   render(); persist();
 }
 function setTab(t){ S.tab=t; document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t)); render(); }
@@ -455,13 +465,14 @@ function render(){
 
   if(S.tab==="betrieb") renderBetrieb();
   else if(S.tab==="markt") renderMarkt();
+  else if(S.tab==="labor") renderLabor();
   else renderKonzern();
 }
 
 function renderTicker(){
   let html="";
   for(const g in GOODS){
-    const p=S.prices[g], base=GOODS[g].base;
+    const p=effRef(g), base=GOODS[g].base;
     const diff=(p/base-1)*100;
     const cls=diff>=0?"up":"down", ar=diff>=0?"▲":"▼";
     html+=`<span class="tk"><span class="nm">${GOODS[g].name}</span> ${p.toFixed(1)}€ <span class="${cls}">${ar}${Math.abs(diff).toFixed(0)}%</span></span>`;
@@ -519,45 +530,68 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
 }
 
 function renderMarkt(){
-  let h=`<div class="hint" style="margin-bottom:12px">Verkaufe zum Marktpreis — abzüglich <b>10 % Gebühr</b>. Die Preise schwanken jetzt kräftig: warte auf Hochs zum Verkaufen, nutze Tiefs zum Einkaufen. Dein <b>Lager ist begrenzt</b> (wächst mit der Stufe) — ist es voll, verfällt die Überproduktion.</div>`;
-  h+=`<div class="sect-title">Lager & Börse</div>`;
-  let any=false;
+  let h=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Viel verkaufen drückt den Richtpreis (Überangebot). Höhere <b>Qualität</b> (Labor) hebt den erzielbaren Preis.</div>`;
+  h+=`<div class="sect-title">Markt & Verkauf</div>`;
   for(const g in GOODS){
     const have=S.warehouse[g]||0;
-    const p=S.prices[g], base=GOODS[g].base, diff=(p/base-1)*100;
+    const base=GOODS[g].base, er=effRef(g), diff=(er/base-1)*100;
     const cls=diff>=0?"up":"down", ar=diff>=0?"▲":"▼";
     const cap=capacity();
     const fillPct=Math.max(0,Math.min(100, have/cap*100));
     const nearFull = have>=cap*0.9;
-    const a=S.auto[g]||{on:false, limit:Math.round(GOODS[g].base*1.4)};
-    if(have>0) any=true;
+    const o=S.sell[g]||{price:Math.max(1,Math.round(er)), on:(have>0)};
+    const want=predictSales(g, o.price);
+    const q=quality(g);
     h+=`<div class="card">
       <div class="mk-head">
         <div class="row" style="gap:9px">
           <div class="ico" style="width:34px;height:34px;font-size:18px">${GOODS[g].ico}</div>
-          <div><div class="name" style="font-size:14px">${GOODS[g].name}</div>
+          <div><div class="name" style="font-size:14px">${GOODS[g].name}${q>0?` <span class="pill" style="background:var(--green-700);color:var(--paper)">Q${q}</span>`:''}</div>
           <div class="sub">Lager: <b style="color:${nearFull?'var(--loss)':'var(--ink)'}">${fmt(have)}</b> / ${fmt(cap)}</div></div>
         </div>
         <div style="text-align:right">
-          <div class="price">${p.toFixed(1)} €</div>
+          <div class="sub">Richtpreis</div>
+          <div class="price">${er.toFixed(1)} €</div>
           <div class="mk-trend ${cls}">${ar} ${Math.abs(diff).toFixed(0)}%</div>
         </div>
       </div>
       <div class="stockbar"><i style="width:${fillPct}%;background:${nearFull?'var(--loss)':'var(--brass)'}"></i></div>
-      <div class="trade">
-        <button class="btn sell" data-sell="${g}" data-amt="10" ${have<10?'disabled':''}>Verk. 10</button>
-        <button class="btn sell" data-sell="${g}" data-amt="100" ${have<100?'disabled':''}>Verk. 100</button>
-        <button class="btn sellall" data-sell="${g}" data-amt="all" ${have<=0?'disabled':''}>Alle (${fmt(have)})</button>
-        <button class="btn buy" data-buy="${g}" data-amt="100" ${S.cash<p*100?'disabled':''}>Kauf 100</button>
-      </div>
       <div class="auto">
-        <button class="btn autotgl ${a.on?'on':''}" data-auto="${g}">⚙ Auto-Verkauf ${a.on?'an':'aus'}</button>
-        <div class="autolim">ab <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(a.limit)} €</b> <button data-adj="${g}" data-d="1">+</button></div>
+        <div class="autolim">Preis <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(o.price)} €</b> <button data-adj="${g}" data-d="1">+</button> <button data-reset="${g}" title="auf Richtpreis">↺</button></div>
+        <button class="btn autotgl ${o.on?'on':''}" data-offer="${g}">${o.on?'Im Verkauf':'Pausiert'}</button>
       </div>
+      <div class="sub" style="margin-top:7px">Absatz ~<b style="color:var(--ink)">${fmt(Math.min(want,have||want))}</b>/Tag${o.price>=er*2?' · Preis zu hoch':''} · <button class="linkbtn" data-buy="${g}" ${S.cash<er*100*1.05?'disabled':''}>100 einkaufen (${eur(er*100*1.05)})</button></div>
     </div>`;
   }
   $('content').innerHTML=h;
   bindMarket();
+}
+
+function renderLabor(){
+  let h=`<div class="hint" style="margin-bottom:12px">Forschung hebt die <b>Qualität</b> einer Ware um eine Stufe. Jede Stufe erhöht den erzielbaren Preis um <b>12 %</b>. Kosten und Dauer steigen mit jeder Stufe steil an — es kann immer nur <b>eine Forschung</b> gleichzeitig laufen.</div>`;
+  if(S.research){
+    const g=S.research.good, total=S.research.total||1;
+    const done=Math.max(0,Math.min(1,(S.day-S.research.startDay)/total));
+    h+=`<div class="card" style="border-color:var(--brass)">
+      <div class="row"><div class="ico">🔬</div><div class="grow"><div class="name">Läuft: ${GOODS[g].name} → Q${quality(g)+1}</div><div class="sub">noch ${Math.max(0,Math.ceil(S.research.endDay-S.day))} Tage</div></div></div>
+      <div class="stockbar" style="margin-top:10px"><i style="width:${(done*100).toFixed(0)}%"></i></div>
+    </div>`;
+  }
+  h+=`<div class="sect-title">Produkte erforschen</div>`;
+  for(const g in GOODS){
+    const q=quality(g), c=researchCost(g), t=researchTime(g);
+    const busy=!!S.research, can=!busy && S.cash>=c;
+    h+=`<div class="card">
+      <div class="row">
+        <div class="ico" style="width:38px;height:38px;font-size:19px">${GOODS[g].ico}</div>
+        <div class="grow"><div class="name" style="font-size:14px">${GOODS[g].name} <span class="pill">Q${q}</span></div>
+        <div class="sub">Preisbonus aktuell +${(q*12)}% · nächste Stufe ${t} Tage</div></div>
+      </div>
+      <button class="btn btn-build" data-research="${g}" ${can?'':'disabled'} style="margin-top:10px;${busy?'background:var(--paper-2);color:var(--ink-soft)':''}">${busy?'Labor belegt':'Erforschen → Q'+(q+1)}<span class="c">${eur(c)}</span></button>
+    </div>`;
+  }
+  $('content').innerHTML=h;
+  document.querySelectorAll('[data-research]').forEach(b=>b.onclick=()=>startResearch(b.dataset.research));
 }
 
 function renderKonzern(){
@@ -619,10 +653,10 @@ function renderKonzern(){
 /* ============ BINDINGS ============ */
 function bindBuild(){ document.querySelectorAll('[data-build]').forEach(b=>b.onclick=()=>build(b.dataset.build)); }
 function bindMarket(){
-  document.querySelectorAll('[data-sell]').forEach(b=>b.onclick=()=>sell(b.dataset.sell, b.dataset.amt==='all'?'all':parseInt(b.dataset.amt)));
-  document.querySelectorAll('[data-buy]').forEach(b=>b.onclick=()=>buy(b.dataset.buy, parseInt(b.dataset.amt)));
-  document.querySelectorAll('[data-auto]').forEach(b=>b.onclick=()=>toggleAuto(b.dataset.auto));
-  document.querySelectorAll('[data-adj]').forEach(b=>b.onclick=()=>adjAuto(b.dataset.adj, parseInt(b.dataset.d)));
+  document.querySelectorAll('[data-offer]').forEach(b=>b.onclick=()=>toggleOffer(b.dataset.offer));
+  document.querySelectorAll('[data-adj]').forEach(b=>b.onclick=()=>adjPrice(b.dataset.adj, parseInt(b.dataset.d)));
+  document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetPrice(b.dataset.reset));
+  document.querySelectorAll('[data-buy]').forEach(b=>b.onclick=()=>buy(b.dataset.buy, 100));
 }
 
 /* ============ OVERLAY ============ */
