@@ -243,7 +243,7 @@ const GOODS = {
   weizen:   {name:"Weizen",   base:3,  ico:"🌾", demand:16, cogs:0.55, perish:true,  season:[1.05,1.10,1.00,0.90]},
   milch:    {name:"Milch",    base:5,  ico:"🥛", demand:13, cogs:0.80, perish:true,  season:[1.10,1.05,1.00,0.95]},
   stoff:    {name:"Stoff",    base:6,  ico:"🧵", demand:13, cogs:0.75, perish:true,  season:[1.00,0.95,1.10,1.05]},
-  mehl:     {name:"Mehl",     base:9,  ico:"🌾", demand:11, cogs:1.90, perish:false, season:[1.00,1.05,1.05,1.00]},
+  mehl:     {name:"Mehl",     base:9,  ico:"🥣", demand:11, cogs:1.90, perish:false, season:[1.00,1.05,1.05,1.00]},
   brot:     {name:"Brot",     base:28, ico:"🍞", demand:8,  cogs:5.20, perish:false, season:[0.95,0.90,1.05,1.30]},
   kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7,  cogs:4.10, perish:false, season:[1.00,1.00,1.10,1.15]},
   kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6,  cogs:6.80, perish:false, season:[0.90,0.85,1.35,1.20]},
@@ -350,12 +350,17 @@ function effFactor(id){ // tatsächlicher Output-Faktor inkl. Ausbau, Löhne, We
   if(S.strikeDays>0) f = 0;
   return f;
 }
-function dailyOutput(){ // Netto-Fluss pro Tag je Ware: Produktion − Eigenverbrauch (nach allen Faktoren)
+function dailyOutput(){ // Realistischer Netto-Fluss/Tag: simuliert eine Produktionsrunde mit Vorprodukt-Begrenzung
   const out={};
-  for(const id in BUILDINGS){ const cnt=S.buildings[id]||0; if(!cnt) continue;
+  const sim={}; for(const g in GOODS) sim[g]=S.warehouse[g]||0;   // aktueller Lagerstand als Basis
+  for(const id in BUILDINGS){ const cnt=S.buildings[id]||0; if(!cnt) continue;   // gleiche Reihenfolge wie tick(): Rohstoff → Endprodukt
+    const b=BUILDINGS[id];
+    let active=cnt;
+    for(const inp in b.consumes) active=Math.min(active, Math.floor((sim[inp]||0)/b.consumes[inp]));
+    if(active<=0) continue;
+    for(const inp in b.consumes){ sim[inp]-=b.consumes[inp]*active; out[inp]=(out[inp]||0)-b.consumes[inp]*active; }
     const f=effFactor(id);
-    for(const g in BUILDINGS[id].produces) out[g]=(out[g]||0)+Math.round(BUILDINGS[id].produces[g]*cnt*f);
-    for(const g in BUILDINGS[id].consumes) out[g]=(out[g]||0)-BUILDINGS[id].consumes[g]*cnt;
+    for(const g in b.produces){ const add=Math.round(b.produces[g]*active*f); sim[g]=(sim[g]||0)+add; out[g]=(out[g]||0)+add; }
   }
   return out;
 }
@@ -364,7 +369,7 @@ function prodBar(){  const flow=dailyOutput();
   if(keys.length===0) return '';
   let inner=keys.map(g=>{
     const v=flow[g], cls=v>=0?'pf-up':'pf-down';
-    return `<span class="pf ${cls}">${GOODS[g].ico}${v>=0?'+':''}${fmt(v)}</span>`;
+    return `<span class="pf ${cls}">${GOODS[g].ico} ${GOODS[g].name} ${v>=0?'+':''}${fmt(v)}</span>`;
   }).join('');
   return `<div class="prodbar"><span class="pf-lbl">Netto/Tag</span>${inner}</div>`;
 }
@@ -381,7 +386,7 @@ function fullCost(g, seen){
   for(const inp in b.consumes) c += (b.consumes[inp]/perBuild)*fullCost(inp, seen); // Vorprodukte
   return c;
 }
-function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(demandNow(g)*Math.min(4, r*r)); }
+function predictSales(g, price){ const er=effRef(g); if(price>=er*2.5) return 0; const r=er/price; return Math.round(demandNow(g)*Math.min(4, Math.pow(r,1.8))); }
 function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, quality(g))); }
 function researchTime(g){ return Math.round(18*Math.pow(1.6, quality(g))); }  // in Tagen/Ticks
 function buildCost(id){ const owned=S.buildings[id]||0; return Math.round(BUILDINGS[id].cost*Math.pow(1.6,owned)); }
@@ -484,7 +489,7 @@ function tick(){
     const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
     if(Math.random()<0.5){ S.prices[g]*=1.6; }
     else{ S.prices[g]*=0.6; }
-    S.prices[g]=Math.max(GOODS[g].base*0.3,Math.min(GOODS[g].base*3.0,S.prices[g]));
+    S.prices[g]=Math.max(GOODS[g].base*0.25,Math.min(GOODS[g].base*4.5,S.prices[g]));
   }
 
   // Forschung abschließen
@@ -523,33 +528,32 @@ function retailTick(){
     let have=S.warehouse[g]||0;
     let off=S.sell[g];
     if(!off && have>0) off=ensureOffer(g);
-    // Auto-Verkauf: Preis folgt automatisch dem Richtpreis, hält unter dem Mindestpreis
+    // Auto-Verkauf: Preis = Richtpreis + Aufschlag; Mindestmenge bleibt im Lager
     const as=S.autoSell[g];
+    const keep=(as && as.on) ? (as.keep||0) : 0;
     if(as && as.on){
       if(!off) off=ensureOffer(g);
-      const ref=Math.max(1, Math.round(effRef(g)));
-      if(ref >= (as.floor||0)){ off.price=ref; off.on=true; }
-      else { off.on=false; }   // Richtpreis unter Mindestpreis → halten statt verschleudern
+      off.price=Math.max(1, Math.round(effRef(g))+(as.markup||0));
+      off.on=true;
     }
     let soldVol=0;
-    if(off && off.on && have>0){
+    if(off && off.on && have>keep){
       const want=predictSales(g, off.price);
-      const sold=Math.min(want, have);
+      const sellable=Math.max(0, have-keep);
+      const sold=Math.min(want, sellable);
       if(sold>0){ const rev=sold*off.price*0.9; S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol=sold; }
     }
-    // Überlauf-Schutz: bei fast vollem Lager Rest zum Richtpreis abstoßen (nur bei aktivem Auto)
+    // Überlauf-Schutz: bei fast vollem Lager Überschuss über der Mindestmenge zum Richtpreis abstoßen
     if(as && as.on && (S.warehouse[g]||0)>=capacity()*0.95){
       const ref=Math.max(1, Math.round(effRef(g)));
-      if(ref >= (as.floor||0)){
-        const dumpQty=S.warehouse[g]||0;
-        if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]=0; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
-      }
+      const dumpQty=Math.max(0, (S.warehouse[g]||0)-keep);
+      if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]-=dumpQty; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
     }
-    // Endogener Referenzpreis
+    // Endogener Referenzpreis — reagiert auf dein Angebot/deine Nachfrage
     let p=S.prices[g];
-    const pressure=(soldVol - demandNow(g))*(base*0.003);
-    p += (base-p)*0.03 - pressure + base*0.015*(Math.random()*2-1);
-    S.prices[g]=Math.max(base*0.3, Math.min(base*3.0, p));
+    const pressure=(soldVol - demandNow(g))*(base*0.006);   // Überangebot drückt, Knappheit hebt (stärker)
+    p += (base-p)*0.012 - pressure + base*0.012*(Math.random()*2-1);   // schwächere Rückkehr zum Basispreis
+    S.prices[g]=Math.max(base*0.25, Math.min(base*4.5, p));   // breitere Spanne → Knappheit zahlt sich aus
   }
   return dayRevenue;
 }
@@ -619,7 +623,7 @@ function buy(g, qty){
   const cost = qty*S.prices[g]*1.05; // Einkauf mit kleinem Aufschlag (Spread)
   if(S.cash<cost){ toast("Nicht genug Kapital."); return; }
   S.cash-=cost; S.warehouse[g]=(S.warehouse[g]||0)+qty;
-  S.prices[g]=Math.min(GOODS[g].base*3.0, S.prices[g]*(1+Math.min(0.12,0.0006*qty)));
+  S.prices[g]=Math.min(GOODS[g].base*4.5, S.prices[g]*(1+Math.min(0.12,0.0006*qty)));
   toast(`−${eur(cost)} (${qty}× ${GOODS[g].name})`);
   render(); persist();
 }
@@ -642,14 +646,21 @@ function toggleOffer(g){ const o=ensureOffer(g); o.on=!o.on; render(); persist()
 function adjPrice(g,dir){ const o=ensureOffer(g); const step=Math.max(1,Math.round(GOODS[g].base*0.05)); o.price=Math.max(1, o.price+dir*step); render(); persist(); }
 function resetPrice(g){ const o=ensureOffer(g); o.price=Math.max(1,Math.round(effRef(g))); render(); persist(); }
 function toggleAutoSell(g){
-  if(!S.autoSell[g]) S.autoSell[g]={on:false, floor:0};
+  if(!S.autoSell[g]) S.autoSell[g]={on:false, markup:0, keep:0};
   S.autoSell[g].on=!S.autoSell[g].on; render(); persist();
 }
-function adjDiscount(g,dir){
-  if(!S.autoSell[g]) S.autoSell[g]={on:false, floor:0};
+function adjMarkup(g,dir){
+  if(!S.autoSell[g]) S.autoSell[g]={on:false, markup:0, keep:0};
   const step=Math.max(1, Math.round(GOODS[g].base*0.1));
-  const cur=S.autoSell[g].floor||0;
-  S.autoSell[g].floor=Math.max(0, Math.min(Math.round(GOODS[g].base*3), cur+dir*step));
+  const cur=S.autoSell[g].markup||0;
+  S.autoSell[g].markup=Math.max(0, Math.min(Math.round(GOODS[g].base*2), cur+dir*step));
+  render(); persist();
+}
+function adjKeep(g,dir){
+  if(!S.autoSell[g]) S.autoSell[g]={on:false, markup:0, keep:0};
+  const step=Math.max(10, Math.round(capacity()*0.05));
+  const cur=S.autoSell[g].keep||0;
+  S.autoSell[g].keep=Math.max(0, Math.min(capacity(), cur+dir*step));
   render(); persist();
 }
 function startResearch(g){
@@ -677,6 +688,18 @@ function upgradeBuilding(id){
   if(S.cash<c){ toast("Nicht genug Kapital."); return; }
   S.cash-=c; S.totalInvested+=c; S.bLvl[id]=bLvl(id)+1;
   addLog(`${BUILDINGS[id].name} auf Stufe ${bLvl(id)} ausgebaut (${eur(c)}).`,"");
+  render(); persist();
+}
+function sellRefund(id){ const cnt=S.buildings[id]||0; return cnt>0 ? Math.round(BUILDINGS[id].cost*Math.pow(1.6,cnt-1)*0.5) : 0; }
+function demolish(id){
+  const cnt=S.buildings[id]||0; if(cnt<=0) return;
+  const refund=sellRefund(id);
+  if(!confirm(`${BUILDINGS[id].name} verkaufen? Du erhältst ${eur(refund)} zurück.`)) return;
+  S.buildings[id]=cnt-1;
+  S.cash+=refund;
+  S.totalInvested=Math.max(0,(S.totalInvested||0)-refund);
+  if(S.buildings[id]===0) S.bLvl[id]=0;   // letztes Gebäude weg → Ausbaustufe zurück
+  addLog(`${BUILDINGS[id].name} verkauft (+${eur(refund)}).`,"");
   render(); persist();
 }
 /* Löhne */
@@ -801,6 +824,7 @@ function renderBetrieb(){
   bindBuild();
   document.querySelectorAll('[data-wage]').forEach(b=>b.onclick=()=>adjWage(parseInt(b.dataset.wage)));
   document.querySelectorAll('[data-upg]').forEach(b=>b.onclick=()=>upgradeBuilding(b.dataset.upg));
+  document.querySelectorAll('[data-sell]').forEach(b=>b.onclick=()=>demolish(b.dataset.sell));
 }
 
 function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
@@ -832,6 +856,7 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
       : `<button class="btn btn-build" data-build="${id}" ${S.cash<cost?'disabled':''}>${cnt>0?'Weiteren bauen':'Bauen'}<span class="c">${eur(cost)}</span></button>`
     }
     ${ (!locked && cnt>0) ? `<button class="btn btn-build" data-upg="${id}" ${S.cash<upgradeCost(id)?'disabled':''} style="margin-top:7px;background:var(--green-800)">⬆ Ausbauen → Stufe ${lvl+1} (+25% Output)<span class="c">${eur(upgradeCost(id))}</span></button>` : '' }
+    ${ (!locked && cnt>0) ? `<button class="btn" data-sell="${id}" style="margin-top:7px;background:none;border:1px solid var(--line);color:var(--ink-soft);font-size:12.5px;padding:7px 10px">🏚 Verkaufen <span style="color:var(--gain);font-weight:700">+${eur(sellRefund(id))}</span></button>` : '' }
   </div>`;
 }
 
@@ -1107,11 +1132,13 @@ function renderKonzern(){
 /* ============ BINDINGS ============ */
 function bindBuild(){ document.querySelectorAll('[data-build]').forEach(b=>b.onclick=()=>build(b.dataset.build)); }
 function autoSellRow(g){
-  const as=S.autoSell[g]||{on:false, floor:0};
-  const floor=as.floor||0;
+  const as=S.autoSell[g]||{on:false, markup:0, keep:0};
+  const markup=as.markup||0, keep=as.keep||0;
+  const er=Math.round(effRef(g));
   return `<div class="auto" style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
-    <div class="autolim" style="font-size:11.5px">🤖 Auto zum Richtpreis · Mindestpreis <button data-da="${g}" data-d="-1">−</button> <b>${floor>0?eur(floor):'aus'}</b> <button data-da="${g}" data-d="1">+</button></div>
-    <button class="btn autotgl ${as.on?'on':''}" data-autosell="${g}">${as.on?'Auto an':'Auto aus'}</button>
+    <div class="autolim" style="font-size:11.5px">🤖 Auto zum Richtpreis ${markup>0?`+ <b>${eur(markup)}</b>`:''} <button data-am="${g}" data-d="-1">−</button> <span class="sub">Aufschlag</span> <button data-am="${g}" data-d="1">+</button>${markup>0?` <span class="sub">= ${eur(er+markup)}</span>`:''}</div>
+    <div class="autolim" style="font-size:11.5px;margin-top:4px">📦 Im Lager behalten <button data-ak="${g}" data-d="-1">−</button> <b>${keep>0?fmt(keep)+' Stk':'aus'}</b> <button data-ak="${g}" data-d="1">+</button></div>
+    <button class="btn autotgl ${as.on?'on':''}" data-autosell="${g}" style="margin-top:6px">${as.on?'Auto an':'Auto aus'}</button>
   </div>`;
 }
 
@@ -1122,7 +1149,8 @@ function bindMarket(){
   document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetPrice(b.dataset.reset));
   document.querySelectorAll('[data-buy]').forEach(b=>b.onclick=()=>buy(b.dataset.buy, 100));
   document.querySelectorAll('[data-autosell]').forEach(b=>b.onclick=()=>toggleAutoSell(b.dataset.autosell));
-  document.querySelectorAll('[data-da]').forEach(b=>b.onclick=()=>adjDiscount(b.dataset.da, parseInt(b.dataset.d)));
+  document.querySelectorAll('[data-am]').forEach(b=>b.onclick=()=>adjMarkup(b.dataset.am, parseInt(b.dataset.d)));
+  document.querySelectorAll('[data-ak]').forEach(b=>b.onclick=()=>adjKeep(b.dataset.ak, parseInt(b.dataset.d)));
 }
 
 /* ============ OVERLAY ============ */
