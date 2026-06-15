@@ -247,6 +247,10 @@ const GOODS = {
   brot:     {name:"Brot",     base:28, ico:"🍞", demand:8,  cogs:5.20, perish:false, season:[0.95,0.90,1.05,1.30]},
   kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7,  cogs:4.10, perish:false, season:[1.00,1.00,1.10,1.15]},
   kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6,  cogs:6.80, perish:false, season:[0.90,0.85,1.35,1.20]},
+  holz:     {name:"Holz",     base:14, ico:"🪵", demand:6,  cogs:3.00, perish:false},
+  moebel:   {name:"Möbel",    base:75, ico:"🪑", demand:4,  cogs:16.0, perish:false},
+  eisen:    {name:"Eisen",    base:18, ico:"🪨", demand:6,  cogs:4.00, perish:false},
+  werkzeug: {name:"Werkzeug", base:95, ico:"🔧", demand:3,  cogs:20.0, perish:false},
 };
 
 const BUILDINGS = {
@@ -257,10 +261,14 @@ const BUILDINGS = {
   baeckerei:   {name:"Bäckerei",    ico:"🥖", unlock:4, cost:9000,  upkeep:40, produces:{brot:5},   consumes:{mehl:6}},
   kaeserei:    {name:"Käserei",     ico:"🧀", unlock:4, cost:8000,  upkeep:35, produces:{kaese:4},  consumes:{milch:6}},
   schneiderei: {name:"Schneiderei", ico:"✂️", unlock:5, cost:11000, upkeep:45, produces:{kleidung:4},consumes:{stoff:6}},
+  forst:       {name:"Forst",        ico:"🌲", unlock:6, cost:14000, upkeep:55, produces:{holz:5},    consumes:{}},
+  schreinerei: {name:"Schreinerei",  ico:"🪚", unlock:6, cost:24000, upkeep:70, produces:{moebel:3},  consumes:{holz:6}},
+  eisenmine:   {name:"Eisenmine",    ico:"⛏️", unlock:7, cost:18000, upkeep:60, produces:{eisen:5},   consumes:{}},
+  schmiede:    {name:"Schmiede",     ico:"🔨", unlock:7, cost:30000, upkeep:85, produces:{werkzeug:3},consumes:{eisen:6}},
 };
 
-const TITLES = ["Kleinhändler","Krämer","Kaufmann","Fabrikant","Großhändler","Industrieller","Magnat","Tycoon","Imperator"];
-const LEVELS = [0, 4000, 12000, 30000, 80000, 200000, 500000, 1200000, 3000000];
+const TITLES = ["Kleinhändler","Krämer","Kaufmann","Fabrikant","Großhändler","Industrieller","Magnat","Tycoon","Imperator","Mogul","Großindustrieller","Wirtschaftsfürst","Krösus"];
+const LEVELS = [0, 4000, 12000, 30000, 80000, 200000, 500000, 1200000, 3000000, 7000000, 16000000, 40000000, 100000000];
 const PRODUCER = {};
 for(const _id in BUILDINGS){ for(const _g in BUILDINGS[_id].produces){ PRODUCER[_g]=_id; } }
 const GOAL = 1000000;
@@ -305,6 +313,7 @@ function freshState(name, prestige){
     reputation: 100,                          // Ruf (Schwarzmarkt)
     weather: {type:'', factor:1, days:0},     // Wetter
     pendingNews: [], demandBoost: {},         // Nachrichten mit Vorlauf
+    treasury: 0,                              // Konzern-Fonds (passives Einkommen)
     prestige: prestige,
   };
 }
@@ -344,8 +353,21 @@ function upMult(id){ return Math.max(0.6, 1 - 0.06*bLvl(id)); }   // günstigere
 function cogsMult(id){ return Math.max(0.6, 1 - 0.05*bLvl(id)); } // günstigere Herstellung je Stufe
 function upgradeCost(id){ return Math.round(BUILDINGS[id].cost*1.6*Math.pow(1.8, bLvl(id)+1)); }
 function wageProd(){ return 0.7 + 0.3*S.wage; }                   // Wage 1.0 → 1.0 Produktivität
-function effFactor(id){ // tatsächlicher Output-Faktor inkl. Ausbau, Löhne, Wetter
-  let f = outMult(id)*wageProd();
+function chainGoodsFor(g){ // lineare Kette: Rohstoff-Wurzel → Endprodukt
+  let root=g, guard=0;
+  while(guard++<10){ const pid=PRODUCER[root]; const b=pid&&BUILDINGS[pid]; const ins=b?Object.keys(b.consumes||{}):[]; if(!ins.length) break; root=ins[0]; }
+  const path=[root]; let cur=root; guard=0;
+  while(guard++<10){ let nx=null; for(const id in BUILDINGS){ const b=BUILDINGS[id]; if(b.consumes&&b.consumes[cur]){ nx=Object.keys(b.produces)[0]; break; } } if(!nx) break; path.push(nx); cur=nx; }
+  return path;
+}
+function integrationBonus(id){ // ganze Kette im Besitz → +15 % Output
+  const prod=Object.keys(BUILDINGS[id].produces); if(!prod.length) return 1;
+  const path=chainGoodsFor(prod[0]); if(path.length<2) return 1;
+  for(const gg of path){ const pid=PRODUCER[gg]; if(!pid||(S.buildings[pid]||0)<=0) return 1; }
+  return 1.15;
+}
+function effFactor(id){ // tatsächlicher Output-Faktor inkl. Ausbau, Löhne, Wetter, Integration
+  let f = outMult(id)*wageProd()*integrationBonus(id);
   if(AGRI.includes(id) && S.weather.days>0) f *= S.weather.factor;
   if(S.strikeDays>0) f = 0;
   return f;
@@ -391,7 +413,7 @@ function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, qual
 function researchTime(g){ return Math.round(18*Math.pow(1.6, quality(g))); }  // in Tagen/Ticks
 function buildCost(id){ const owned=S.buildings[id]||0; return Math.round(BUILDINGS[id].cost*Math.pow(1.6,owned)); }
 function netWorth(){
-  let n = S.cash + S.totalInvested*0.5 - (S.debt||0);
+  let n = S.cash + S.totalInvested*0.5 - (S.debt||0) + (S.treasury||0);
   for(const g in S.warehouse) n += (S.warehouse[g]||0)*S.prices[g];
   for(const s in (S.stk||{})) n += (S.stk[s]||0)*(S.stockP[s]||0);
   return n;
@@ -434,9 +456,8 @@ function tick(){
       }
       if(active<=0){ upkeepTotal += b.upkeep*cnt*upMult(id)*S.wage*0.3; continue; } // Leerlauf-Grundkosten
       for(const inp in b.consumes) S.warehouse[inp] -= b.consumes[inp]*active;
-      // Output-Faktoren: Ausbau × Produktivität × Wetter (zentral)
-      let factor = outMult(id)*wp;
-      if(AGRI.includes(id) && S.weather.days>0) factor *= S.weather.factor;
+      // Output-Faktoren zentral über effFactor (Ausbau × Löhne × Integration × Wetter)
+      let factor = effFactor(id);
       let cogsTotal=0;
       for(const out in b.produces){
         const cur=S.warehouse[out]||0, add=Math.round(b.produces[out]*active*factor);
@@ -474,6 +495,8 @@ function tick(){
 
   // Aktienkurse bewegen
   for(const s in STOCKS){ const base=STOCKS[s].base; let p=S.stockP[s]; p+=(base-p)*0.015+base*0.03*(Math.random()*2-1); S.stockP[s]=Math.max(base*0.2,p); }
+  // Konzern-Fonds: täglicher Ertrag, konjunkturabhängig
+  if((S.treasury||0)>0){ S.treasury += S.treasury * (0.0009*Math.max(0.5, cycle().factor)); }
 
   // Nachrichten mit Vorlauf abarbeiten
   newsTick();
@@ -729,6 +752,8 @@ function blackMarket(g){
 /* Aktien */
 function buyStock(s,n){ const c=n*S.stockP[s]*1.01; if(S.cash<c){ toast("Nicht genug Kapital."); return; } S.cash-=c; S.stk[s]=(S.stk[s]||0)+n; render(); persist(); }
 function sellStock(s,n){ const have=S.stk[s]||0; n=Math.min(n,have); if(n<=0){ toast("Keine Anteile."); return; } S.cash+=n*S.stockP[s]*0.99; S.stk[s]-=n; render(); persist(); }
+function treasuryDeposit(n){ if(n==='all') n=S.cash; n=Math.min(n,S.cash); if(n<=0){ toast("Kein Kapital."); return; } S.cash-=n; S.treasury=(S.treasury||0)+n; render(); persist(); }
+function treasuryWithdraw(n){ if(n==='all') n=S.treasury||0; n=Math.min(n,S.treasury||0); if(n<=0){ toast("Fonds leer."); return; } S.treasury-=n; S.cash+=n; render(); persist(); }
 /* Exit / Konzernverkauf */
 function exitValue(){ const annual=Math.max(0,avgProfit())*120; return Math.round(Math.max(netWorth(), netWorth()*0.5+annual*6)); }
 function sellCompany(){
@@ -749,7 +774,10 @@ const HAS_LS=lsOK();
 function persist(){ if(!HAS_LS) return; try{ localStorage.setItem(SAVEKEY, JSON.stringify(S)); }catch(e){} }
 function loadSaved(){ if(!HAS_LS) return null; try{ const r=localStorage.getItem(SAVEKEY); return r?JSON.parse(r):null; }catch(e){ return null; } }
 function wipeSave(){ if(!HAS_LS) return; try{ localStorage.removeItem(SAVEKEY); }catch(e){} }
-function hydrate(d){ const s=Object.assign(freshState(d.company), d); s.running=false; return s; }
+function hydrate(d){ const s=Object.assign(freshState(d.company), d); s.running=false;
+  for(const g in GOODS){ if(s.prices[g]==null) s.prices[g]=GOODS[g].base; if(s.warehouse[g]==null) s.warehouse[g]=0; if(s.q[g]==null) s.q[g]=0; }   // neue Waren in alte Spielstände migrieren
+  if(s.treasury==null) s.treasury=0;
+  return s; }
 function saveGame(){ if(!HAS_LS){ toast("Speichern hier nicht verfügbar."); return; } persist(); toast("Spielstand gespeichert."); }
 function loadGame(){ const d=loadSaved(); if(d){ S=hydrate(d); $('c-speed').textContent=SPEEDS[S.speedIdx]+"×"; setPlay(false); render(); toast("Spielstand geladen."); } else toast("Kein Spielstand gefunden."); }
 
@@ -862,7 +890,7 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
 
 function renderMarkt(){
   let h=prodBar();
-  h+=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Schalte <b>Auto an</b>, damit der Preis automatisch dem Richtpreis folgt — kein manuelles Nachjustieren mehr. Mit dem <b>Mindestpreis</b> verkaufst du nie unter deiner Grenze.</div>`;
+  h+=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem 2,5-fachen Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Schalte <b>Auto an</b>, damit zum Richtpreis verkauft wird — mit <b>Aufschlag</b> ein paar Euro darüber (mehr Marge, etwas weniger Absatz). Die <b>Mindestmenge</b> bleibt immer im Lager.</div>`;
   h+=`<div class="sect-title">Markt & Verkauf</div>`;
   const ownKeys = Object.keys(GOODS).filter(ownsProducer);
   const keys = MKT_ALL ? Object.keys(GOODS) : ownKeys;
@@ -1096,6 +1124,30 @@ function renderKonzern(){
     </div>
   </div>`;
 
+  const tRate=0.0009*Math.max(0.5, cycle().factor);
+  h+=`<div class="sect-title">Konzern-Fonds</div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Angelegtes Kapital</span><span class="price" style="color:var(--brass)">${eur(S.treasury||0)}</span></div>
+    <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Ertrag heute (~${(tRate*100).toFixed(2)} %)</span><span class="price" style="font-size:14px;color:var(--gain)">+${eur((S.treasury||0)*tRate)}</span></div>
+    <div class="sub" style="margin-top:7px;font-size:11px">Passives Einkommen. Verzinst sich täglich — mehr in der Hochkonjunktur, weniger in der Rezession. Jederzeit abrufbar.</div>
+    <div class="bankgrid">
+      <button class="btn loan" data-dep="10000">Anlegen 10.000</button>
+      <button class="btn loan" data-dep="50000">Anlegen 50.000</button>
+      <button class="btn loan" data-dep="all">Alles anlegen</button>
+      <button class="btn repay" data-wd="all" ${(S.treasury||0)<=0?'disabled':''}>Alles abrufen</button>
+    </div>
+  </div>`;
+
+  let intLines='', chainsSeen={};
+  for(const id in BUILDINGS){ const prod=Object.keys(BUILDINGS[id].produces); if(!prod.length) continue;
+    const path=chainGoodsFor(prod[0]); if(path.length<2) continue;
+    const key=path.join('>'); if(chainsSeen[key]) continue; chainsSeen[key]=true;
+    const full=path.every(gg=>{ const pid=PRODUCER[gg]; return pid&&(S.buildings[pid]||0)>0; });
+    intLines+=`<div class="row" style="justify-content:space-between;margin-top:5px"><span class="sub" style="font-size:13px">${path.map(gg=>GOODS[gg].ico).join(' → ')}</span><span class="pill" style="background:${full?'var(--gain)':'var(--paper-2)'};color:${full?'#fff':'var(--ink-soft)'}">${full?'+15 % aktiv':'unvollständig'}</span></div>`;
+  }
+  h+=`<div class="sect-title">Vertikale Integration</div>
+  <div class="card"><div class="sub" style="font-size:11px;margin-bottom:4px">Besitzt du jede Stufe einer Kette (Rohstoff bis Endprodukt), bekommen alle Betriebe dieser Kette <b>+15 % Output</b>.</div>${intLines}</div>`;
+
   h+=`<div class="sect-title">Finanzamt & Exit</div>
   <div class="card">
     <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Quartalsgewinn (laufend)</span><span class="price" style="font-size:14px;color:${S.qProfit>=0?'var(--gain)':'var(--loss)'}">${S.qProfit>=0?'+':'−'}${eur(Math.abs(S.qProfit))}</span></div>
@@ -1126,6 +1178,8 @@ function renderKonzern(){
   $('b-new').onclick=()=>{ if(confirm("Neues Spiel starten? Der aktuelle Fortschritt geht verloren.")) newGame(); };
   document.querySelectorAll('[data-loan]').forEach(b=>b.onclick=()=>takeLoan(parseInt(b.dataset.loan)));
   document.querySelectorAll('[data-repay]').forEach(b=>b.onclick=()=>repayLoan(b.dataset.repay==='all'?(S.debt||0):parseInt(b.dataset.repay)));
+  document.querySelectorAll('[data-dep]').forEach(b=>b.onclick=()=>treasuryDeposit(b.dataset.dep==='all'?'all':parseInt(b.dataset.dep)));
+  document.querySelectorAll('[data-wd]').forEach(b=>b.onclick=()=>treasuryWithdraw('all'));
   $('b-exit') && ($('b-exit').onclick=()=>{ if(confirm("Konzern verkaufen und mit Prestige-Bonus neu starten?")) sellCompany(); });
 }
 
