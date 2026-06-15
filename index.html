@@ -130,7 +130,7 @@
   .buy{background:#fff;color:var(--ink);border:1px solid var(--line)}
   .stockbar{height:4px;border-radius:2px;background:var(--paper-2);margin-top:8px;overflow:hidden}
   .stockbar i{display:block;height:100%;background:var(--brass)}
-  .auto{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)}
+  .auto{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)}
   .autotgl{background:var(--paper-2);color:var(--ink-soft);padding:7px 11px;font-size:12px;border-radius:8px;border:none;cursor:pointer;font-weight:600;font-family:inherit}
   .autotgl.on{background:var(--gain);color:#fff}
   .autolim{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink-soft);display:flex;align-items:center;gap:7px}
@@ -247,10 +247,10 @@ const GOODS = {
   brot:     {name:"Brot",     base:28, ico:"🍞", demand:8,  cogs:5.20, perish:false, season:[0.95,0.90,1.05,1.30]},
   kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7,  cogs:4.10, perish:false, season:[1.00,1.00,1.10,1.15]},
   kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6,  cogs:6.80, perish:false, season:[0.90,0.85,1.35,1.20]},
-  holz:     {name:"Holz",     base:14, ico:"🪵", demand:6,  cogs:3.00, perish:false},
-  moebel:   {name:"Möbel",    base:75, ico:"🪑", demand:4,  cogs:16.0, perish:false},
-  eisen:    {name:"Eisen",    base:18, ico:"🪨", demand:6,  cogs:4.00, perish:false},
-  werkzeug: {name:"Werkzeug", base:95, ico:"🔧", demand:3,  cogs:20.0, perish:false},
+  holz:     {name:"Holz",     base:16, ico:"🪵", demand:6,  cogs:3.00, perish:false},
+  moebel:   {name:"Möbel",    base:90, ico:"🪑", demand:4,  cogs:14.0, perish:false},
+  eisen:    {name:"Eisen",    base:20, ico:"🪨", demand:6,  cogs:4.00, perish:false},
+  werkzeug: {name:"Werkzeug", base:110,ico:"🔧", demand:3,  cogs:16.0, perish:false},
 };
 
 const BUILDINGS = {
@@ -261,10 +261,10 @@ const BUILDINGS = {
   baeckerei:   {name:"Bäckerei",    ico:"🥖", unlock:4, cost:9000,  upkeep:40, produces:{brot:5},   consumes:{mehl:6}},
   kaeserei:    {name:"Käserei",     ico:"🧀", unlock:4, cost:8000,  upkeep:35, produces:{kaese:4},  consumes:{milch:6}},
   schneiderei: {name:"Schneiderei", ico:"✂️", unlock:5, cost:11000, upkeep:45, produces:{kleidung:4},consumes:{stoff:6}},
-  forst:       {name:"Forst",        ico:"🌲", unlock:6, cost:14000, upkeep:55, produces:{holz:5},    consumes:{}},
-  schreinerei: {name:"Schreinerei",  ico:"🪚", unlock:6, cost:24000, upkeep:70, produces:{moebel:3},  consumes:{holz:6}},
-  eisenmine:   {name:"Eisenmine",    ico:"⛏️", unlock:7, cost:18000, upkeep:60, produces:{eisen:5},   consumes:{}},
-  schmiede:    {name:"Schmiede",     ico:"🔨", unlock:7, cost:30000, upkeep:85, produces:{werkzeug:3},consumes:{eisen:6}},
+  forst:       {name:"Forst",        ico:"🌲", unlock:6, cost:14000, upkeep:35, produces:{holz:6},    consumes:{}},
+  schreinerei: {name:"Schreinerei",  ico:"🪚", unlock:6, cost:24000, upkeep:55, produces:{moebel:3},  consumes:{holz:6}},
+  eisenmine:   {name:"Eisenmine",    ico:"⛏️", unlock:7, cost:18000, upkeep:40, produces:{eisen:6},   consumes:{}},
+  schmiede:    {name:"Schmiede",     ico:"🔨", unlock:7, cost:30000, upkeep:60, produces:{werkzeug:3},consumes:{eisen:6}},
 };
 
 const TITLES = ["Kleinhändler","Krämer","Kaufmann","Fabrikant","Großhändler","Industrieller","Magnat","Tycoon","Imperator","Mogul","Großindustrieller","Wirtschaftsfürst","Krösus"];
@@ -327,6 +327,7 @@ function capacity(){ return CAP_BASE + (level()-1)*CAP_PER_LEVEL; }
 function avgProfit(){ const h=S.cashHist; if(h.length<2) return 0; return (h[h.length-1]-h[0])/(h.length-1); }
 function quality(g){ return S.q[g]||0; }
 let MKT_ALL = false;                                  // Markt-Filter: nur eigene Waren / alle
+let UTIL = {};                                        // Auslastung je Betrieb (in renderBetrieb gesetzt)
 function ownsProducer(g){ const pid=PRODUCER[g]; return !!(pid && (S.buildings[pid]||0)>0); }
 function effRef(g){ return S.prices[g]*(1+0.12*quality(g)); }            // Q hebt den erzielbaren Preis
 function ensureOffer(g){ if(!S.sell[g]) S.sell[g]={price:Math.max(1,Math.round(effRef(g))), on:true}; return S.sell[g]; }
@@ -385,6 +386,23 @@ function dailyOutput(){ // Realistischer Netto-Fluss/Tag: simuliert eine Produkt
     for(const g in b.produces){ const add=Math.round(b.produces[g]*active*f); sim[g]=(sim[g]||0)+add; out[g]=(out[g]||0)+add; }
   }
   return out;
+}
+function buildingUtil(){ // wie viele Einheiten je Gebäude tatsächlich laufen (durch Input begrenzt)
+  const sim={}; for(const g in GOODS) sim[g]=S.warehouse[g]||0;
+  const res={};
+  for(const id in BUILDINGS){ const cnt=S.buildings[id]||0; if(!cnt) continue;
+    const b=BUILDINGS[id];
+    let active=cnt, lim=null, minCan=Infinity;
+    for(const inp in b.consumes){ const can=Math.floor((sim[inp]||0)/b.consumes[inp]); if(can<minCan){ minCan=can; lim=inp; } }
+    if(lim!==null) active=Math.max(0, Math.min(cnt, minCan));
+    if(active>0){
+      for(const inp in b.consumes) sim[inp]-=b.consumes[inp]*active;
+      const f=effFactor(id);
+      for(const g in b.produces) sim[g]=(sim[g]||0)+Math.round(b.produces[g]*active*f);
+    }
+    res[id]={active, cnt, lim:(active<cnt?lim:null)};
+  }
+  return res;
 }
 function prodBar(){  const flow=dailyOutput();
   const keys=Object.keys(GOODS).filter(g=>flow[g]!==undefined && flow[g]!==0);
@@ -572,11 +590,13 @@ function retailTick(){
       const dumpQty=Math.max(0, (S.warehouse[g]||0)-keep);
       if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]-=dumpQty; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
     }
-    // Endogener Referenzpreis — reagiert auf dein Angebot/deine Nachfrage
+    // Endogener Referenzpreis — nur echtes Überangebot drückt; sonst Rückkehr zum Basispreis
     let p=S.prices[g];
-    const pressure=(soldVol - demandNow(g))*(base*0.006);   // Überangebot drückt, Knappheit hebt (stärker)
-    p += (base-p)*0.012 - pressure + base*0.012*(Math.random()*2-1);   // schwächere Rückkehr zum Basispreis
-    S.prices[g]=Math.max(base*0.25, Math.min(base*4.5, p));   // breitere Spanne → Knappheit zahlt sich aus
+    const over=soldVol - demandNow(g);
+    if(over>0){ p += -over*(base*0.006) + (base-p)*0.012; }   // mehr verkauft als nachgefragt → Preis sinkt
+    else { p += (base-p)*0.05; }                              // kein Überangebot → Richtung Basispreis (kein Hochtreiben)
+    p += base*0.01*(Math.random()*2-1);                        // etwas Rauschen
+    S.prices[g]=Math.max(base*0.25, Math.min(base*4.5, p));
   }
   return dayRevenue;
 }
@@ -825,6 +845,7 @@ function renderTicker(){
 
 function renderBetrieb(){
   const lv=level();
+  UTIL=buildingUtil();
   let h=statusBanner();
   if(Object.keys(S.buildings).length===0){
     h+=`<div class="hint">Willkommen, Chef. Du startest mit <b>${eur(S.cash)}</b>. Baue zuerst einen <b>Bauernhof</b> oder <b>Kuhstall</b>, um Rohwaren zu erzeugen — diese verkaufst du dann im <b>Markt</b>. Veredelte Waren bringen deutlich mehr.</div>`;
@@ -879,6 +900,12 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
       ${showOwned?`<div class="owned">${cnt}</div>`:''}
     </div>
     ${chain}
+    ${ (cnt>0 && !locked) ? (()=>{ const u=UTIL[id]||{active:cnt,cnt:cnt,lim:null};
+        if(!Object.keys(b.consumes).length) return `<div class="chain" style="color:var(--gain)">✅ Voll ausgelastet (${cnt}/${cnt})</div>`;
+        if(u.active>=cnt) return `<div class="chain" style="color:var(--gain)">✅ Voll ausgelastet (${cnt}/${cnt}) — ${GOODS[Object.keys(b.consumes)[0]].name} reicht</div>`;
+        if(u.active<=0) return `<div class="chain" style="color:var(--loss)">⛔ Steht still — zu wenig ${GOODS[u.lim].name} (Lager ${fmt(S.warehouse[u.lim]||0)})</div>`;
+        return `<div class="chain" style="color:var(--brass)">⚠️ Läuft nur ${u.active}/${cnt} — ${GOODS[u.lim].name} fehlt</div>`;
+      })() : '' }
     ${ locked
       ? `<div class="btn btn-build" style="background:var(--paper-2);color:var(--loss);cursor:default">🔒 Ab Stufe ${b.unlock}</div>`
       : `<button class="btn btn-build" data-build="${id}" ${S.cash<cost?'disabled':''}>${cnt>0?'Weiteren bauen':'Bauen'}<span class="c">${eur(cost)}</span></button>`
@@ -1189,10 +1216,16 @@ function autoSellRow(g){
   const as=S.autoSell[g]||{on:false, markup:0, keep:0};
   const markup=as.markup||0, keep=as.keep||0;
   const er=Math.round(effRef(g));
-  return `<div class="auto" style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
-    <div class="autolim" style="font-size:11.5px">🤖 Auto zum Richtpreis ${markup>0?`+ <b>${eur(markup)}</b>`:''} <button data-am="${g}" data-d="-1">−</button> <span class="sub">Aufschlag</span> <button data-am="${g}" data-d="1">+</button>${markup>0?` <span class="sub">= ${eur(er+markup)}</span>`:''}</div>
-    <div class="autolim" style="font-size:11.5px;margin-top:4px">📦 Im Lager behalten <button data-ak="${g}" data-d="-1">−</button> <b>${keep>0?fmt(keep)+' Stk':'aus'}</b> <button data-ak="${g}" data-d="1">+</button></div>
-    <button class="btn autotgl ${as.on?'on':''}" data-autosell="${g}" style="margin-top:6px">${as.on?'Auto an':'Auto aus'}</button>
+  return `<div style="margin-top:8px;border-top:1px solid var(--line);padding-top:9px;display:flex;flex-direction:column;gap:8px">
+    <div class="autolim" style="justify-content:space-between;width:100%;font-size:12px">
+      <span>🤖 Aufschlag ${markup>0?`<b>+${eur(markup)}</b> <span class="sub">(= ${eur(er+markup)})</span>`:'<span class="sub">aus</span>'}</span>
+      <span style="display:flex;gap:7px;flex:0 0 auto"><button data-am="${g}" data-d="-1">−</button><button data-am="${g}" data-d="1">+</button></span>
+    </div>
+    <div class="autolim" style="justify-content:space-between;width:100%;font-size:12px">
+      <span>📦 Im Lager behalten <b>${keep>0?fmt(keep)+' Stk':'aus'}</b></span>
+      <span style="display:flex;gap:7px;flex:0 0 auto"><button data-ak="${g}" data-d="-1">−</button><button data-ak="${g}" data-d="1">+</button></span>
+    </div>
+    <button class="btn autotgl ${as.on?'on':''}" data-autosell="${g}" style="width:100%">${as.on?'Auto-Verkauf an (zum Richtpreis)':'Auto-Verkauf aus'}</button>
   </div>`;
 }
 
