@@ -227,6 +227,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="betrieb"><span class="ic">🏭</span><span class="tl">Betrieb</span></button>
     <button class="tab" data-tab="markt"><span class="ic">📈</span><span class="tl">Markt</span></button>
+    <button class="tab" data-tab="kette"><span class="ic">🔗</span><span class="tl">Kette</span></button>
     <button class="tab" data-tab="labor"><span class="ic">🔬</span><span class="tl">Labor</span></button>
     <button class="tab" data-tab="handel"><span class="ic">🤝</span><span class="tl">Handel</span></button>
     <button class="tab" data-tab="konzern"><span class="ic">📊</span><span class="tl">Konzern</span></button>
@@ -316,6 +317,8 @@ function level(){ let l=1; for(let i=1;i<LEVELS.length;i++) if(S.xp>=LEVELS[i]) 
 function capacity(){ return CAP_BASE + (level()-1)*CAP_PER_LEVEL; }
 function avgProfit(){ const h=S.cashHist; if(h.length<2) return 0; return (h[h.length-1]-h[0])/(h.length-1); }
 function quality(g){ return S.q[g]||0; }
+let MKT_ALL = false;                                  // Markt-Filter: nur eigene Waren / alle
+function ownsProducer(g){ const pid=PRODUCER[g]; return !!(pid && (S.buildings[pid]||0)>0); }
 function effRef(g){ return S.prices[g]*(1+0.12*quality(g)); }            // Q hebt den erzielbaren Preis
 function ensureOffer(g){ if(!S.sell[g]) S.sell[g]={price:Math.max(1,Math.round(effRef(g))), on:true}; return S.sell[g]; }
 /* --- Saison, Konjunktur, Bevölkerung --- */
@@ -520,18 +523,27 @@ function retailTick(){
     let have=S.warehouse[g]||0;
     let off=S.sell[g];
     if(!off && have>0) off=ensureOffer(g);
+    // Auto-Verkauf: Preis folgt automatisch dem Richtpreis, hält unter dem Mindestpreis
+    const as=S.autoSell[g];
+    if(as && as.on){
+      if(!off) off=ensureOffer(g);
+      const ref=Math.max(1, Math.round(effRef(g)));
+      if(ref >= (as.floor||0)){ off.price=ref; off.on=true; }
+      else { off.on=false; }   // Richtpreis unter Mindestpreis → halten statt verschleudern
+    }
     let soldVol=0;
     if(off && off.on && have>0){
       const want=predictSales(g, off.price);
       const sold=Math.min(want, have);
       if(sold>0){ const rev=sold*off.price*0.9; S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol=sold; }
     }
-    // Notverkauf bei vollem Lager
-    const as=S.autoSell[g];
-    if(as && as.on && (S.warehouse[g]||0)>=capacity()*0.70){
-      const dumpPrice=Math.round(effRef(g)*((100-(as.discount||20))/100));
-      const dumpQty=S.warehouse[g]||0;
-      if(dumpQty>0 && dumpPrice>0){ const rev=dumpQty*dumpPrice*0.9; S.warehouse[g]=0; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
+    // Überlauf-Schutz: bei fast vollem Lager Rest zum Richtpreis abstoßen (nur bei aktivem Auto)
+    if(as && as.on && (S.warehouse[g]||0)>=capacity()*0.95){
+      const ref=Math.max(1, Math.round(effRef(g)));
+      if(ref >= (as.floor||0)){
+        const dumpQty=S.warehouse[g]||0;
+        if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]=0; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
+      }
     }
     // Endogener Referenzpreis
     let p=S.prices[g];
@@ -630,12 +642,14 @@ function toggleOffer(g){ const o=ensureOffer(g); o.on=!o.on; render(); persist()
 function adjPrice(g,dir){ const o=ensureOffer(g); const step=Math.max(1,Math.round(GOODS[g].base*0.05)); o.price=Math.max(1, o.price+dir*step); render(); persist(); }
 function resetPrice(g){ const o=ensureOffer(g); o.price=Math.max(1,Math.round(effRef(g))); render(); persist(); }
 function toggleAutoSell(g){
-  if(!S.autoSell[g]) S.autoSell[g]={on:false, discount:20};
+  if(!S.autoSell[g]) S.autoSell[g]={on:false, floor:0};
   S.autoSell[g].on=!S.autoSell[g].on; render(); persist();
 }
 function adjDiscount(g,dir){
-  if(!S.autoSell[g]) S.autoSell[g]={on:false, discount:20};
-  S.autoSell[g].discount=Math.max(5, Math.min(60, S.autoSell[g].discount+dir*5));
+  if(!S.autoSell[g]) S.autoSell[g]={on:false, floor:0};
+  const step=Math.max(1, Math.round(GOODS[g].base*0.1));
+  const cur=S.autoSell[g].floor||0;
+  S.autoSell[g].floor=Math.max(0, Math.min(Math.round(GOODS[g].base*3), cur+dir*step));
   render(); persist();
 }
 function startResearch(g){
@@ -733,6 +747,7 @@ function render(){
 
   if(S.tab==="betrieb") renderBetrieb();
   else if(S.tab==="markt") renderMarkt();
+  else if(S.tab==="kette") renderKette();
   else if(S.tab==="labor") renderLabor();
   else if(S.tab==="handel") renderHandel();
   else renderKonzern();
@@ -822,9 +837,18 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
 
 function renderMarkt(){
   let h=prodBar();
-  h+=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Viel verkaufen drückt den Richtpreis (Überangebot). Höhere <b>Qualität</b> (Labor) hebt den erzielbaren Preis.</div>`;
+  h+=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Schalte <b>Auto an</b>, damit der Preis automatisch dem Richtpreis folgt — kein manuelles Nachjustieren mehr. Mit dem <b>Mindestpreis</b> verkaufst du nie unter deiner Grenze.</div>`;
   h+=`<div class="sect-title">Markt & Verkauf</div>`;
-  for(const g in GOODS){
+  const ownKeys = Object.keys(GOODS).filter(ownsProducer);
+  const keys = MKT_ALL ? Object.keys(GOODS) : ownKeys;
+  h+=`<div class="auto" style="margin:-4px 2px 12px;border:none;padding:0">
+    <div class="sub" style="font-size:11.5px">${MKT_ALL?'Alle Waren (auch zum Zukaufen)':'Nur Waren, die du selbst produzierst'}</div>
+    <button class="btn autotgl ${MKT_ALL?'on':''}" id="mkt-all">${MKT_ALL?'Alle Waren':'Nur eigene'}</button>
+  </div>`;
+  if(keys.length===0){
+    h+=`<div class="card"><div class="sub" style="text-align:center;padding:14px 4px">Du produzierst noch nichts. Bau im <b>Betrieb</b>-Tab deinen ersten Betrieb — dann erscheint die Ware hier.<br><br>Vorprodukte zum Zukaufen findest du über <b>„Alle Waren"</b> oben.</div></div>`;
+  }
+  for(const g of keys){
     const have=S.warehouse[g]||0;
     const base=GOODS[g].base, er=effRef(g), diff=(er/base-1)*100;
     const cogs=fullCost(g);
@@ -836,6 +860,7 @@ function renderMarkt(){
     const want=predictSales(g, o.price);
     const q=quality(g);
     const netPrice=o.price*0.9;           // nach 10% Gebühr
+    const autoOn=!!(S.autoSell[g] && S.autoSell[g].on);
     const margin=netPrice-cogs;
     const marginPct=Math.round(margin/netPrice*100);
     const marginCls=margin>=0?'var(--gain)':'var(--loss)';
@@ -854,12 +879,14 @@ function renderMarkt(){
       </div>
       <div class="stockbar"><i style="width:${fillPct}%;background:${nearFull?'var(--loss)':'var(--brass)'}"></i></div>
       <div class="auto">
-        <div class="autolim">Preis <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(o.price)} €</b> <button data-adj="${g}" data-d="1">+</button> <button data-reset="${g}" title="auf Richtpreis">↺</button></div>
+        <div class="autolim">Preis <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(o.price)} €</b> <button data-adj="${g}" data-d="1">+</button> <button data-reset="${g}" title="auf Richtpreis">↺</button>${autoOn?' <span class="pill" style="background:var(--gain);color:#fff">Auto</span>':''}</div>
         <button class="btn autotgl ${o.on?'on':''}" data-offer="${g}">${o.on?'Im Verkauf':'Pausiert'}</button>
       </div>
-      <div style="margin-top:9px;padding:8px 10px;border-radius:8px;background:var(--paper-2);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-        <div class="sub" style="font-size:11.5px">Vollkosten <b style="color:var(--ink)">${cogs.toFixed(2)} €</b> · Erlös nach Geb. <b style="color:var(--ink)">${netPrice.toFixed(2)} €</b></div>
-        <div style="font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;color:${marginCls}">${margin>=0?'+':''}${margin.toFixed(2)} € / Stk (${marginPct}%)</div>
+      <div style="margin-top:9px;padding:9px 11px;border-radius:8px;background:var(--paper-2);font-size:12px">
+        <div style="display:flex;justify-content:space-between"><span class="sub">Verkaufspreis</span><span style="font-family:'JetBrains Mono',monospace">${o.price.toFixed(2)} €</span></div>
+        <div style="display:flex;justify-content:space-between"><span class="sub">− Gebühr 10 %</span><span style="font-family:'JetBrains Mono',monospace;color:var(--loss)">−${(o.price*0.1).toFixed(2)} €</span></div>
+        <div style="display:flex;justify-content:space-between"><span class="sub">− Herstellung</span><span style="font-family:'JetBrains Mono',monospace;color:var(--loss)">−${cogs.toFixed(2)} €</span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:5px;padding-top:5px;border-top:1px solid var(--line)"><b>Gewinn / Stück</b><b style="font-family:'JetBrains Mono',monospace;color:${marginCls}">${margin>=0?'+':''}${margin.toFixed(2)} € (${marginPct}%)</b></div>
       </div>
       ${autoSellRow(g)}
       <div class="sub" style="margin-top:7px">Absatz ~<b style="color:var(--ink)">${fmt(Math.min(want,have||want))}</b>/Tag${o.price>=er*2?' · Preis zu hoch':''} · <button class="linkbtn" data-buy="${g}" ${S.cash<er*100*1.05?'disabled':''}>100 einkaufen (${eur(er*100*1.05)})</button></div>
@@ -867,6 +894,59 @@ function renderMarkt(){
   }
   $('content').innerHTML=h;
   bindMarket();
+}
+
+function renderKette(){
+  let h=`<div class="hint" style="margin-bottom:12px">So hängen deine Waren zusammen: Rohstoffe werden zu Zwischen- und Endprodukten veredelt. <b style="color:var(--gain)">Grün</b> = du deckst die Stufe mit einem Gebäude ab. <b>Gestrichelt</b> = Lücke — das Vorprodukt musst du zukaufen (Markt → „Alle Waren").</div>`;
+  h+=`<div class="sect-title">Wirtschaftsketten</div>`;
+  // Rohstoffe = Waren, deren Gebäude nichts verbraucht
+  const raws=[];
+  for(const id in BUILDINGS){
+    if(Object.keys(BUILDINGS[id].consumes||{}).length===0){
+      for(const out in BUILDINGS[id].produces) raws.push(out);
+    }
+  }
+  function nextGoods(good){
+    const res=[];
+    for(const id in BUILDINGS){
+      if(BUILDINGS[id].consumes && BUILDINGS[id].consumes[good]){
+        for(const out in BUILDINGS[id].produces) res.push(out);
+      }
+    }
+    return res;
+  }
+  function chainFrom(root){
+    const path=[root]; let cur=root, guard=0;
+    while(guard++<8){ const nx=nextGoods(cur); if(!nx.length) break; cur=nx[0]; path.push(cur); }
+    return path;
+  }
+  function node(g){
+    const pid=PRODUCER[g], b=BUILDINGS[pid], owned=ownsProducer(g), stock=S.warehouse[g]||0;
+    return `<div style="flex:0 0 auto;text-align:center;min-width:88px;padding:10px 8px;border-radius:10px;border:1.5px ${owned?'solid var(--gain)':'dashed var(--line)'};background:${owned?'rgba(44,138,85,.08)':'var(--paper-2)'}">
+      <div style="font-size:23px;line-height:1">${GOODS[g].ico}</div>
+      <div class="name" style="font-size:12.5px;margin-top:4px">${GOODS[g].name}</div>
+      <div class="sub" style="font-size:10px;margin-top:2px">${b?b.ico+' '+b.name:''}</div>
+      <div style="font-size:10px;font-weight:700;margin-top:4px;color:${owned?'var(--gain)':'var(--ink-soft)'}">${owned?'✓ Lager '+fmt(stock):'fehlt'}</div>
+    </div>`;
+  }
+  for(const root of raws){
+    const path=chainFrom(root);
+    const have=path.filter(ownsProducer).length;
+    let row='';
+    path.forEach((g,i)=>{
+      row+=node(g);
+      if(i<path.length-1) row+=`<div style="flex:0 0 auto;align-self:center;font-size:18px;color:var(--brass);font-weight:700">→</div>`;
+    });
+    const full=have===path.length;
+    h+=`<div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px">
+        <div class="name" style="font-size:14px">${GOODS[root].name} → ${GOODS[path[path.length-1]].name}</div>
+        <span class="pill" style="background:${full?'var(--gain)':'var(--paper-2)'};color:${full?'#fff':'var(--ink-soft)'}">${have}/${path.length} Stufen</span>
+      </div>
+      <div style="display:flex;align-items:stretch;gap:7px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px">${row}</div>
+    </div>`;
+  }
+  $('content').innerHTML=h;
 }
 
 function renderLabor(){
@@ -1027,16 +1107,16 @@ function renderKonzern(){
 /* ============ BINDINGS ============ */
 function bindBuild(){ document.querySelectorAll('[data-build]').forEach(b=>b.onclick=()=>build(b.dataset.build)); }
 function autoSellRow(g){
-  const as=S.autoSell[g]||{on:false, discount:20};
-  const dumpPrice=Math.round(effRef(g)*((100-as.discount)/100));
-  const dumpNet=(dumpPrice*0.9).toFixed(2);
+  const as=S.autoSell[g]||{on:false, floor:0};
+  const floor=as.floor||0;
   return `<div class="auto" style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
-    <div class="autolim" style="font-size:11.5px">🏷 Notverkauf ab 70% Lager · Abschlag <button data-da="${g}" data-d="-1">−</button> <b>${as.discount}%</b> <button data-da="${g}" data-d="1">+</button> = ${eur(dumpPrice)} (${dumpNet}€ netto)</div>
+    <div class="autolim" style="font-size:11.5px">🤖 Auto zum Richtpreis · Mindestpreis <button data-da="${g}" data-d="-1">−</button> <b>${floor>0?eur(floor):'aus'}</b> <button data-da="${g}" data-d="1">+</button></div>
     <button class="btn autotgl ${as.on?'on':''}" data-autosell="${g}">${as.on?'Auto an':'Auto aus'}</button>
   </div>`;
 }
 
 function bindMarket(){
+  const mkAll=$('mkt-all'); if(mkAll) mkAll.onclick=()=>{ MKT_ALL=!MKT_ALL; render(); };
   document.querySelectorAll('[data-offer]').forEach(b=>b.onclick=()=>toggleOffer(b.dataset.offer));
   document.querySelectorAll('[data-adj]').forEach(b=>b.onclick=()=>adjPrice(b.dataset.adj, parseInt(b.dataset.d)));
   document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetPrice(b.dataset.reset));
