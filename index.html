@@ -314,6 +314,7 @@ function freshState(name, prestige){
     weather: {type:'', factor:1, days:0},     // Wetter
     pendingNews: [], demandBoost: {},         // Nachrichten mit Vorlauf
     treasury: 0,                              // Konzern-Fonds (passives Einkommen)
+    soldUnits: {}, soldRev: {},                // kumulierte Verkaufsstatistik
     prestige: prestige,
   };
 }
@@ -562,6 +563,7 @@ function tick(){
   persist();
   render();
 }
+function recordSale(g, qty, rev){ S.soldUnits[g]=(S.soldUnits[g]||0)+qty; S.soldRev[g]=(S.soldRev[g]||0)+rev; }
 function retailTick(){
   let dayRevenue=0;
   for(const g in GOODS){
@@ -582,20 +584,20 @@ function retailTick(){
       const want=predictSales(g, off.price);
       const sellable=Math.max(0, have-keep);
       const sold=Math.min(want, sellable);
-      if(sold>0){ const rev=sold*off.price*0.9; S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol=sold; }
+      if(sold>0){ const rev=sold*off.price*0.9; S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol=sold; recordSale(g,sold,rev); }
     }
     // Überlauf-Schutz: bei fast vollem Lager Überschuss über der Mindestmenge zum Richtpreis abstoßen
     if(as && as.on && (S.warehouse[g]||0)>=capacity()*0.95){
       const ref=Math.max(1, Math.round(effRef(g)));
       const dumpQty=Math.max(0, (S.warehouse[g]||0)-keep);
-      if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]-=dumpQty; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
+      if(dumpQty>0){ const rev=dumpQty*ref*0.9; S.warehouse[g]-=dumpQty; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; recordSale(g,dumpQty,rev); }
     }
-    // Endogener Referenzpreis — nur echtes Überangebot drückt; sonst Rückkehr zum Basispreis
+    // Endogener Referenzpreis — lebhaftere Bewegung
     let p=S.prices[g];
     const over=soldVol - demandNow(g);
-    if(over>0){ p += -over*(base*0.006) + (base-p)*0.012; }   // mehr verkauft als nachgefragt → Preis sinkt
-    else { p += (base-p)*0.05; }                              // kein Überangebot → Richtung Basispreis (kein Hochtreiben)
-    p += base*0.01*(Math.random()*2-1);                        // etwas Rauschen
+    if(over>0){ p += -over*(base*0.010) + (base-p)*0.03; }      // Überangebot drückt stärker
+    else { p += (base-p)*0.08; }                                // schnellere Rückkehr zum Basispreis
+    p += base*0.04*(Math.random()*2-1);                          // spürbares Rauschen
     S.prices[g]=Math.max(base*0.25, Math.min(base*4.5, p));
   }
   return dayRevenue;
@@ -937,13 +939,16 @@ function renderMarkt(){
     const fillPct=Math.max(0,Math.min(100, have/cap*100));
     const nearFull = have>=cap*0.9;
     const o=S.sell[g]||{price:Math.max(1,Math.round(er)), on:(have>0)};
-    const want=predictSales(g, o.price);
     const q=quality(g);
-    const netPrice=o.price*0.9;           // nach 10% Gebühr
     const autoOn=!!(S.autoSell[g] && S.autoSell[g].on);
+    const mk=(S.autoSell[g] && S.autoSell[g].markup)||0;
+    const effPrice = autoOn ? Math.max(1, Math.round(er)+mk) : o.price;  // tatsächlicher Verkaufspreis
+    const want=predictSales(g, effPrice);
+    const netPrice=effPrice*0.9;          // nach 10% Gebühr
     const margin=netPrice-cogs;
     const marginPct=Math.round(margin/netPrice*100);
     const marginCls=margin>=0?'var(--gain)':'var(--loss)';
+    const soldU=S.soldUnits[g]||0, soldR=S.soldRev[g]||0;
     h+=`<div class="card">
       <div class="mk-head">
         <div class="row" style="gap:9px">
@@ -959,17 +964,18 @@ function renderMarkt(){
       </div>
       <div class="stockbar"><i style="width:${fillPct}%;background:${nearFull?'var(--loss)':'var(--brass)'}"></i></div>
       <div class="auto">
-        <div class="autolim">Preis <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(o.price)} €</b> <button data-adj="${g}" data-d="1">+</button> <button data-reset="${g}" title="auf Richtpreis">↺</button>${autoOn?' <span class="pill" style="background:var(--gain);color:#fff">Auto</span>':''}</div>
+        <div class="autolim">Preis <button data-adj="${g}" data-d="-1">−</button> <b>${fmt(o.price)} €</b> <button data-adj="${g}" data-d="1">+</button> <button data-reset="${g}" title="auf Richtpreis">↺</button>${autoOn?` <span class="pill" style="background:var(--gain);color:#fff">Auto ${eur(effPrice)}</span>`:''}</div>
         <button class="btn autotgl ${o.on?'on':''}" data-offer="${g}">${o.on?'Im Verkauf':'Pausiert'}</button>
       </div>
       <div style="margin-top:9px;padding:9px 11px;border-radius:8px;background:var(--paper-2);font-size:12px">
-        <div style="display:flex;justify-content:space-between"><span class="sub">Verkaufspreis</span><span style="font-family:'JetBrains Mono',monospace">${o.price.toFixed(2)} €</span></div>
-        <div style="display:flex;justify-content:space-between"><span class="sub">− Gebühr 10 %</span><span style="font-family:'JetBrains Mono',monospace;color:var(--loss)">−${(o.price*0.1).toFixed(2)} €</span></div>
+        <div style="display:flex;justify-content:space-between"><span class="sub">Verkaufspreis${autoOn&&mk>0?' (inkl. Aufschlag)':''}</span><span style="font-family:'JetBrains Mono',monospace">${effPrice.toFixed(2)} €</span></div>
+        <div style="display:flex;justify-content:space-between"><span class="sub">− Gebühr 10 %</span><span style="font-family:'JetBrains Mono',monospace;color:var(--loss)">−${(effPrice*0.1).toFixed(2)} €</span></div>
         <div style="display:flex;justify-content:space-between"><span class="sub">− Herstellung</span><span style="font-family:'JetBrains Mono',monospace;color:var(--loss)">−${cogs.toFixed(2)} €</span></div>
         <div style="display:flex;justify-content:space-between;margin-top:5px;padding-top:5px;border-top:1px solid var(--line)"><b>Gewinn / Stück</b><b style="font-family:'JetBrains Mono',monospace;color:${marginCls}">${margin>=0?'+':''}${margin.toFixed(2)} € (${marginPct}%)</b></div>
+        ${soldU>0?`<div style="display:flex;justify-content:space-between;margin-top:5px;padding-top:5px;border-top:1px solid var(--line)"><span class="sub">∑ verkauft</span><span style="font-family:'JetBrains Mono',monospace">${fmt(soldU)} Stk · ${eur(soldR)}</span></div>`:''}
       </div>
       ${autoSellRow(g)}
-      <div class="sub" style="margin-top:7px">Absatz ~<b style="color:var(--ink)">${fmt(Math.min(want,have||want))}</b>/Tag${o.price>=er*2?' · Preis zu hoch':''} · <button class="linkbtn" data-buy="${g}" ${S.cash<er*100*1.05?'disabled':''}>100 einkaufen (${eur(er*100*1.05)})</button></div>
+      <div class="sub" style="margin-top:7px">Absatz ~<b style="color:var(--ink)">${fmt(Math.min(want,have||want))}</b>/Tag${effPrice>=er*2.5?' · Preis zu hoch':''} · <button class="linkbtn" data-buy="${g}" ${S.cash<er*100*1.05?'disabled':''}>100 einkaufen (${eur(er*100*1.05)})</button></div>
     </div>`;
   }
   $('content').innerHTML=h;
