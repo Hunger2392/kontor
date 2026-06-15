@@ -148,6 +148,13 @@
   .banner{display:flex;justify-content:space-around;gap:6px;background:var(--green-800);color:var(--paper);
     border-radius:9px;padding:7px 10px;margin-bottom:10px;font-size:11.5px;font-weight:600;font-family:'JetBrains Mono',monospace}
   .banner.warn{background:var(--loss);color:#fff;justify-content:center}
+  .prodbar{display:flex;align-items:center;gap:8px;overflow-x:auto;background:#fff;border:1px solid var(--line);
+    border-radius:9px;padding:8px 10px;margin-bottom:12px;-webkit-overflow-scrolling:touch}
+  .prodbar::-webkit-scrollbar{display:none}
+  .pf-lbl{font-size:9.5px;letter-spacing:1px;text-transform:uppercase;color:var(--ink-soft);font-weight:700;flex:0 0 auto}
+  .pf{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:12.5px;flex:0 0 auto;white-space:nowrap}
+  .pf-up{color:var(--gain)}
+  .pf-down{color:var(--loss)}
   .tab .tl{font-size:9.5px}
 
   /* log */
@@ -332,6 +339,31 @@ function upMult(id){ return Math.max(0.6, 1 - 0.06*bLvl(id)); }   // günstigere
 function cogsMult(id){ return Math.max(0.6, 1 - 0.05*bLvl(id)); } // günstigere Herstellung je Stufe
 function upgradeCost(id){ return Math.round(BUILDINGS[id].cost*1.6*Math.pow(1.8, bLvl(id)+1)); }
 function wageProd(){ return 0.7 + 0.3*S.wage; }                   // Wage 1.0 → 1.0 Produktivität
+function effFactor(id){ // tatsächlicher Output-Faktor inkl. Ausbau, Löhne, Wetter
+  let f = outMult(id)*wageProd();
+  if(AGRI.includes(id) && S.weather.days>0) f *= S.weather.factor;
+  if(S.strikeDays>0) f = 0;
+  return f;
+}
+function dailyOutput(){ // Netto-Fluss pro Tag je Ware: Produktion − Eigenverbrauch (nach allen Faktoren)
+  const out={};
+  for(const id in BUILDINGS){ const cnt=S.buildings[id]||0; if(!cnt) continue;
+    const f=effFactor(id);
+    for(const g in BUILDINGS[id].produces) out[g]=(out[g]||0)+Math.round(BUILDINGS[id].produces[g]*cnt*f);
+    for(const g in BUILDINGS[id].consumes) out[g]=(out[g]||0)-BUILDINGS[id].consumes[g]*cnt;
+  }
+  return out;
+}
+function prodBar(){
+  const flow=dailyOutput();
+  const keys=Object.keys(GOODS).filter(g=>flow[g]!==undefined && flow[g]!==0);
+  if(keys.length===0) return '';
+  let inner=keys.map(g=>{
+    const v=flow[g], cls=v>=0?'pf-up':'pf-down';
+    return `<span class="pf ${cls}">${GOODS[g].ico}${v>=0?'+':''}${fmt(v)}</span>`;
+  }).join('');
+  return `<div class="prodbar"><span class="pf-lbl">Netto/Tag</span>${inner}</div>`;
+}
 function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(demandNow(g)*Math.min(4, r*r)); }
 function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, quality(g))); }
 function researchTime(g){ return Math.round(18*Math.pow(1.6, quality(g))); }  // in Tagen/Ticks
@@ -380,7 +412,7 @@ function tick(){
       }
       if(active<=0){ upkeepTotal += b.upkeep*cnt*upMult(id)*S.wage*0.3; continue; } // Leerlauf-Grundkosten
       for(const inp in b.consumes) S.warehouse[inp] -= b.consumes[inp]*active;
-      // Output-Faktoren: Ausbau × Produktivität × Wetter (nur Agrar)
+      // Output-Faktoren: Ausbau × Produktivität × Wetter (zentral)
       let factor = outMult(id)*wp;
       if(AGRI.includes(id) && S.weather.days>0) factor *= S.weather.factor;
       let cogsTotal=0;
@@ -696,6 +728,7 @@ function statusBanner(){
   let b=`<div class="banner"><span>${SEASON_ICO[s]} ${SEASON_NAMES[s]}</span><span>${c.phase>=0?'📈':'📉'} ${c.name}</span><span>👥 ${fmt(S.pop)}</span></div>`;
   if(S.weather.days>0) b+=`<div class="banner warn">${S.weather.type==='Dürre'?'🌵':'🥶'} ${S.weather.type} aktiv — Agrar −${Math.round((1-S.weather.factor)*100)}% (${S.weather.days} T.)</div>`;
   if(S.strikeDays>0) b+=`<div class="banner warn">✊ Streik — Produktion steht (${S.strikeDays} T.). Löhne erhöhen!</div>`;
+  b+=prodBar();
   return b;
 }
 
@@ -745,7 +778,11 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
   const locked=lv<b.unlock;
   const cost=buildCost(id);
   const lvl=bLvl(id);
-  const prod=Object.entries(b.produces).map(([g,n])=>`${Math.round(n*outMult(id))}× ${GOODS[g].ico}${GOODS[g].name}`).join(", ");
+  const f=effFactor(id);
+  const prod=Object.entries(b.produces).map(([g,n])=>{
+    const real=Math.round(n*(S.buildings[id]?f:outMult(id)*wageProd()));
+    return `${real}× ${GOODS[g].ico}${GOODS[g].name}`;
+  }).join(", ");
   const cons=Object.keys(b.consumes).length?Object.entries(b.consumes).map(([g,n])=>`${n}× ${GOODS[g].name}`).join(", "):null;
   let chain="";
   if(cons) chain=`<div class="chain">${cons} <span class="arr">→</span> ${prod} · pro Tag</div>`;
@@ -770,7 +807,8 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
 }
 
 function renderMarkt(){
-  let h=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Viel verkaufen drückt den Richtpreis (Überangebot). Höhere <b>Qualität</b> (Labor) hebt den erzielbaren Preis.</div>`;
+  let h=prodBar();
+  h+=`<div class="hint" style="margin-bottom:12px">Du setzt pro Ware deinen <b>Verkaufspreis</b>. Je günstiger du gegenüber dem Richtpreis anbietest, desto mehr nimmt der Markt ab — über dem doppelten Richtpreis kauft niemand. Jeder Verkauf kostet <b>10 % Gebühr</b>. Viel verkaufen drückt den Richtpreis (Überangebot). Höhere <b>Qualität</b> (Labor) hebt den erzielbaren Preis.</div>`;
   h+=`<div class="sect-title">Markt & Verkauf</div>`;
   for(const g in GOODS){
     const have=S.warehouse[g]||0;
