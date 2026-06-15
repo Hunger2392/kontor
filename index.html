@@ -260,6 +260,8 @@ const BUILDINGS = {
 
 const TITLES = ["Kleinhändler","Krämer","Kaufmann","Fabrikant","Großhändler","Industrieller","Magnat","Tycoon","Imperator"];
 const LEVELS = [0, 4000, 12000, 30000, 80000, 200000, 500000, 1200000, 3000000];
+const PRODUCER = {};
+for(const _id in BUILDINGS){ for(const _g in BUILDINGS[_id].produces){ PRODUCER[_g]=_id; } }
 const GOAL = 1000000;
 const SPEEDS = [1,2,4];
 const BASE_TICK = 2600;            // ms pro Tag bei 1× (vorher 1000) — Tage vergehen langsamer
@@ -354,8 +356,7 @@ function dailyOutput(){ // Netto-Fluss pro Tag je Ware: Produktion − Eigenverb
   }
   return out;
 }
-function prodBar(){
-  const flow=dailyOutput();
+function prodBar(){  const flow=dailyOutput();
   const keys=Object.keys(GOODS).filter(g=>flow[g]!==undefined && flow[g]!==0);
   if(keys.length===0) return '';
   let inner=keys.map(g=>{
@@ -363,6 +364,19 @@ function prodBar(){
     return `<span class="pf ${cls}">${GOODS[g].ico}${v>=0?'+':''}${fmt(v)}</span>`;
   }).join('');
   return `<div class="prodbar"><span class="pf-lbl">Netto/Tag</span>${inner}</div>`;
+}
+function costFactor(id){ return outMult(id)*wageProd(); }   // Ausbau + Löhne (ohne Wetter/Streik, für stabile Kosten)
+function fullCost(g, seen){
+  const id=PRODUCER[g];
+  if(!id) return GOODS[g].cogs||0;
+  seen=seen||{}; if(seen[g]) return GOODS[g].cogs||0; seen[g]=true;  // Zyklusschutz
+  const b=BUILDINGS[id];
+  const perBuild=b.produces[g]*costFactor(id);
+  if(perBuild<=0) return GOODS[g].cogs||0;
+  let c = GOODS[g].cogs*cogsMult(id);                       // direkte Herstellung
+  c += (b.upkeep*upMult(id)*S.wage)/perBuild;               // anteiliger Unterhalt/Löhne
+  for(const inp in b.consumes) c += (b.consumes[inp]/perBuild)*fullCost(inp, seen); // Vorprodukte
+  return c;
 }
 function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(demandNow(g)*Math.min(4, r*r)); }
 function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, quality(g))); }
@@ -813,7 +827,7 @@ function renderMarkt(){
   for(const g in GOODS){
     const have=S.warehouse[g]||0;
     const base=GOODS[g].base, er=effRef(g), diff=(er/base-1)*100;
-    const cogs=GOODS[g].cogs;
+    const cogs=fullCost(g);
     const cls=diff>=0?"up":"down", ar=diff>=0?"▲":"▼";
     const cap=capacity();
     const fillPct=Math.max(0,Math.min(100, have/cap*100));
@@ -844,7 +858,7 @@ function renderMarkt(){
         <button class="btn autotgl ${o.on?'on':''}" data-offer="${g}">${o.on?'Im Verkauf':'Pausiert'}</button>
       </div>
       <div style="margin-top:9px;padding:8px 10px;border-radius:8px;background:var(--paper-2);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-        <div class="sub" style="font-size:11.5px">Herst.kosten <b style="color:var(--ink)">${cogs.toFixed(2)} €</b> · Erlös nach Geb. <b style="color:var(--ink)">${netPrice.toFixed(2)} €</b></div>
+        <div class="sub" style="font-size:11.5px">Vollkosten <b style="color:var(--ink)">${cogs.toFixed(2)} €</b> · Erlös nach Geb. <b style="color:var(--ink)">${netPrice.toFixed(2)} €</b></div>
         <div style="font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;color:${marginCls}">${margin>=0?'+':''}${margin.toFixed(2)} € / Stk (${marginPct}%)</div>
       </div>
       ${autoSellRow(g)}
