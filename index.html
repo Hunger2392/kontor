@@ -315,6 +315,7 @@ function freshState(name, prestige){
     pendingNews: [], demandBoost: {},         // Nachrichten mit Vorlauf
     treasury: 0,                              // Konzern-Fonds (passives Einkommen)
     soldUnits: {}, soldRev: {},                // kumulierte Verkaufsstatistik
+    ipo: {public:false, floatPct:0, price:0, mcapHist:[], takeover:null, cooldown:0, paidDiv:0, raised:0},
     prestige: prestige,
   };
 }
@@ -541,6 +542,21 @@ function tick(){
     S.research=null;
   }
 
+  // Eigener Aktienkurs & Übernahmeangebote
+  if(S.ipo.public){
+    const target=companyValuation()/SHARES_TOTAL;
+    S.ipo.price += (target-S.ipo.price)*0.06 + S.ipo.price*0.025*(Math.random()*2-1);
+    if(S.ipo.price<0.01) S.ipo.price=0.01;
+    S.ipo.mcapHist.push(Math.round(marketCap())); if(S.ipo.mcapHist.length>60) S.ipo.mcapHist.shift();
+    if(S.ipo.cooldown>0) S.ipo.cooldown--;
+    // Übernahmeangebot, wenn Streubesitz hoch und Konzern wertvoll
+    if(!S.ipo.takeover && S.ipo.cooldown===0 && S.ipo.floatPct>=0.35 && Math.random()<0.025){
+      const premium=1.3+Math.random()*0.5;
+      S.ipo.takeover={premium, value:Math.round(companyValuation()*premium)};
+      addLog(`Übernahmeangebot: Investor bietet ${eur(S.ipo.takeover.value)} (+${Math.round((premium-1)*100)} %). Im Konzern-Tab entscheiden.`,"good"); toast("🤝 Übernahmeangebot!");
+    }
+  }
+
   // Steuer am Quartalsende
   if(S.day % QUARTER === 0){
     const afa = S.totalInvested*0.04;          // Abschreibung mindert Steuerlast
@@ -548,6 +564,12 @@ function tick(){
     const tax = Math.round(TAX_RATE*taxable);
     if(tax>0){ S.cash-=tax; S.lastTax=tax; addLog(`Quartalssteuer fällig: ${eur(tax)} (25 % auf ${eur(taxable)} nach AfA).`,"bad"); }
     else { S.lastTax=0; }
+    // Dividende an die Aktionäre (Streubesitz-Anteil von 30 % des Quartalsgewinns)
+    if(S.ipo.public && S.ipo.floatPct>0){
+      const div=Math.round(Math.max(0,S.qProfit-tax)*0.30*S.ipo.floatPct);
+      if(div>0){ S.cash-=div; S.ipo.paidDiv=(S.ipo.paidDiv||0)+div; addLog(`Dividende ausgeschüttet: ${eur(div)} an Aktionäre (${Math.round(S.ipo.floatPct*100)} % Streubesitz).`,"bad"); }
+      else { S.ipo.price*=0.96; addLog("Kein Gewinn — keine Dividende. Aktienkurs gibt nach.","bad"); }
+    }
     S.qProfit=0;
   }
 
@@ -778,6 +800,48 @@ function treasuryDeposit(n){ if(n==='all') n=S.cash; n=Math.min(n,S.cash); if(n<
 function treasuryWithdraw(n){ if(n==='all') n=S.treasury||0; n=Math.min(n,S.treasury||0); if(n<=0){ toast("Fonds leer."); return; } S.treasury-=n; S.cash+=n; render(); persist(); }
 /* Exit / Konzernverkauf */
 function exitValue(){ const annual=Math.max(0,avgProfit())*120; return Math.round(Math.max(netWorth(), netWorth()*0.5+annual*6)); }
+/* ===== Kapitalmarkt: eigener Konzern an der Börse ===== */
+const SHARES_TOTAL = 1000000;            // fiktive Gesamtaktienzahl
+function companyValuation(){ const annual=Math.max(0,avgProfit())*120; return Math.round(Math.max(netWorth(), netWorth()*0.4+annual*8)); } // Ertragsmultiplikator 8×
+function sharePrice(){ return (S.ipo.price>0 ? S.ipo.price : companyValuation()/SHARES_TOTAL); }
+function marketCap(){ return sharePrice()*SHARES_TOTAL; }
+function goPublic(floatPct){
+  if(S.ipo.public){ toast("Bereits börsennotiert."); return; }
+  if(companyValuation()<50000){ toast("Konzern noch zu klein für einen Börsengang (ab 50.000 €)."); return; }
+  const val=companyValuation();
+  const proceeds=Math.round(val*floatPct);
+  S.ipo.public=true; S.ipo.floatPct=floatPct; S.ipo.price=val/SHARES_TOTAL; S.ipo.raised=proceeds; S.ipo.paidDiv=0;
+  S.cash+=proceeds;
+  addLog(`Börsengang! ${Math.round(floatPct*100)} % platziert, ${eur(proceeds)} Emissionserlös. Aktienkurs ${sharePrice().toFixed(2)} €.`,"good");
+  toast(`🔔 IPO +${eur(proceeds)}`);
+  render(); persist();
+}
+function issueShares(pct){ // Kapitalerhöhung (verwässert, bringt Geld)
+  if(!S.ipo.public){ toast("Erst Börsengang."); return; }
+  if(S.ipo.floatPct+pct>0.75){ toast("Streubesitz max. 75 %."); return; }
+  const proceeds=Math.round(marketCap()*pct*0.97); // leichter Abschlag
+  S.ipo.floatPct+=pct; S.cash+=proceeds;
+  S.ipo.price*=(1-0.03); // Verwässerung drückt den Kurs leicht
+  addLog(`Kapitalerhöhung: +${Math.round(pct*100)} % platziert, ${eur(proceeds)}. Streubesitz nun ${Math.round(S.ipo.floatPct*100)} %.`,"");
+  render(); persist();
+}
+function buyback(pct){ // Aktienrückkauf (kostet Geld, senkt Dividendenlast, stützt Kurs)
+  if(!S.ipo.public){ return; }
+  pct=Math.min(pct, S.ipo.floatPct);
+  const cost=Math.round(marketCap()*pct*1.05); // Aufpreis
+  if(S.cash<cost){ toast("Nicht genug Kapital."); return; }
+  S.cash-=cost; S.ipo.floatPct=Math.max(0,S.ipo.floatPct-pct); S.ipo.price*=1.02;
+  if(S.ipo.floatPct<=0.001){ S.ipo.public=false; S.ipo.floatPct=0; addLog("Alle Anteile zurückgekauft — Konzern wieder vollständig in Privatbesitz.","good"); }
+  else addLog(`Aktienrückkauf: −${Math.round(pct*100)} % Streubesitz für ${eur(cost)}.`,"");
+  render(); persist();
+}
+function acceptTakeover(){
+  const t=S.ipo.takeover; if(!t) return;
+  const np=(S.prestige||0)+1, nm=S.company;
+  wipeSave();
+  showOverlay("Übernahme angenommen!", `Ein Investor zahlt ${eur(t.value)} (Aufpreis ${Math.round((t.premium-1)*100)} %) für deinen Konzern. Du startest als Prestige-Stufe ${np} mit mehr Startkapital und größerer Stadt.`, "Neu durchstarten", ()=>{ S=freshState(nm, np); hideOverlay(); $('c-speed').textContent="1×"; setPlay(true); render(); persist(); });
+}
+function declineTakeover(){ if(S.ipo.takeover){ addLog("Übernahmeangebot abgelehnt.",""); S.ipo.takeover=null; S.ipo.cooldown=40; render(); persist(); } }
 function sellCompany(){
   if(netWorth()<GOAL){ toast("Erst ab 1.000.000 € Konzernwert."); return; }
   const val=exitValue(), np=(S.prestige||0)+1, nm=S.company;
@@ -1181,6 +1245,40 @@ function renderKonzern(){
   h+=`<div class="sect-title">Vertikale Integration</div>
   <div class="card"><div class="sub" style="font-size:11px;margin-bottom:4px">Besitzt du jede Stufe einer Kette (Rohstoff bis Endprodukt), bekommen alle Betriebe dieser Kette <b>+15 % Output</b>.</div>${intLines}</div>`;
 
+  h+=`<div class="sect-title">Kapitalmarkt — Börsengang</div>`;
+  if(!S.ipo.public){
+    h+=`<div class="card">
+      <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Geschätzte Bewertung</span><span class="price" style="color:var(--brass)">${eur(companyValuation())}</span></div>
+      <div class="sub" style="margin-top:7px;font-size:11px">Verkaufe einen Anteil deines Konzerns an die Börse → sofort frisches Kapital. Dafür zahlst du danach jedes Quartal <b>Dividende</b> (30 % des Quartalsgewinns × Streubesitz). Ab 50.000 € Bewertung.</div>
+      <div class="bankgrid">
+        <button class="btn loan" data-ipo="0.2" ${companyValuation()<50000?'disabled':''}>20 % (${eur(companyValuation()*0.2)})</button>
+        <button class="btn loan" data-ipo="0.35" ${companyValuation()<50000?'disabled':''}>35 % (${eur(companyValuation()*0.35)})</button>
+        <button class="btn loan" data-ipo="0.49" ${companyValuation()<50000?'disabled':''}>49 % (${eur(companyValuation()*0.49)})</button>
+      </div>
+    </div>`;
+  } else {
+    const sp=sharePrice();
+    h+=`<div class="card">
+      <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Aktienkurs</span><span class="price" style="color:var(--brass)">${sp.toFixed(2)} €</span></div>
+      <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Marktkapitalisierung</span><span class="price" style="font-size:14px">${eur(marketCap())}</span></div>
+      <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Streubesitz</span><span class="pill">${Math.round(S.ipo.floatPct*100)} %</span></div>
+      <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Dividenden gezahlt</span><span class="price" style="font-size:14px;color:var(--loss)">${eur(S.ipo.paidDiv||0)}</span></div>
+      <div class="stockbar" style="margin-top:8px"><div style="font-size:11px;color:var(--ink-soft);margin-bottom:6px">Marktkapitalisierung-Verlauf</div>${sparkSVG(S.ipo.mcapHist)}</div>
+      <div class="bankgrid" style="margin-top:10px">
+        <button class="btn loan" data-issue="0.1" ${S.ipo.floatPct+0.1>0.75?'disabled':''}>Kapitalerhöhung +10 %</button>
+        <button class="btn repay" data-buyback="0.1" ${S.cash<marketCap()*0.1*1.05?'disabled':''}>Rückkauf 10 %</button>
+      </div>
+      <div class="sub" style="margin-top:6px;font-size:11px">Kapitalerhöhung bringt Geld, verwässert aber und erhöht die Dividendenlast. Rückkauf senkt die Last und stützt den Kurs.</div>
+    </div>`;
+    if(S.ipo.takeover){
+      h+=`<div class="card" style="border-color:var(--brass)">
+        <div class="name" style="font-size:14px">🤝 Übernahmeangebot</div>
+        <div class="sub" style="margin-top:4px">Ein Investor bietet <b style="color:var(--ink)">${eur(S.ipo.takeover.value)}</b> (+${Math.round((S.ipo.takeover.premium-1)*100)} % Aufpreis) für deinen Konzern. Annehmen = lukrativer Exit + Prestige.</div>
+        <div class="trade"><button class="btn sell" id="tk-accept">Annehmen</button><button class="btn buy" id="tk-decline">Ablehnen</button></div>
+      </div>`;
+    }
+  }
+
   h+=`<div class="sect-title">Finanzamt & Exit</div>
   <div class="card">
     <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Quartalsgewinn (laufend)</span><span class="price" style="font-size:14px;color:${S.qProfit>=0?'var(--gain)':'var(--loss)'}">${S.qProfit>=0?'+':'−'}${eur(Math.abs(S.qProfit))}</span></div>
@@ -1214,6 +1312,11 @@ function renderKonzern(){
   document.querySelectorAll('[data-dep]').forEach(b=>b.onclick=()=>treasuryDeposit(b.dataset.dep==='all'?'all':parseInt(b.dataset.dep)));
   document.querySelectorAll('[data-wd]').forEach(b=>b.onclick=()=>treasuryWithdraw('all'));
   $('b-exit') && ($('b-exit').onclick=()=>{ if(confirm("Konzern verkaufen und mit Prestige-Bonus neu starten?")) sellCompany(); });
+  document.querySelectorAll('[data-ipo]').forEach(b=>b.onclick=()=>{ if(confirm(`${Math.round(parseFloat(b.dataset.ipo)*100)} % an die Börse bringen?`)) goPublic(parseFloat(b.dataset.ipo)); });
+  document.querySelectorAll('[data-issue]').forEach(b=>b.onclick=()=>issueShares(parseFloat(b.dataset.issue)));
+  document.querySelectorAll('[data-buyback]').forEach(b=>b.onclick=()=>buyback(parseFloat(b.dataset.buyback)));
+  $('tk-accept') && ($('tk-accept').onclick=()=>{ if(confirm("Übernahmeangebot annehmen und neu durchstarten?")) acceptTakeover(); });
+  $('tk-decline') && ($('tk-decline').onclick=declineTakeover);
 }
 
 /* ============ BINDINGS ============ */
