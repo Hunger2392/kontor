@@ -145,6 +145,10 @@
   .spark .area{fill:rgba(201,162,75,.13);stroke:none}
   .linkbtn{background:none;border:none;color:var(--green-700);font-weight:700;font-family:inherit;font-size:12px;cursor:pointer;padding:0;text-decoration:underline}
   .linkbtn:disabled{color:var(--ink-soft);text-decoration:none;opacity:.6}
+  .banner{display:flex;justify-content:space-around;gap:6px;background:var(--green-800);color:var(--paper);
+    border-radius:9px;padding:7px 10px;margin-bottom:10px;font-size:11.5px;font-weight:600;font-family:'JetBrains Mono',monospace}
+  .banner.warn{background:var(--loss);color:#fff;justify-content:center}
+  .tab .tl{font-size:9.5px}
 
   /* log */
   .log{font-size:12.5px;line-height:1.5}
@@ -217,6 +221,7 @@
     <button class="tab active" data-tab="betrieb"><span class="ic">🏭</span><span class="tl">Betrieb</span></button>
     <button class="tab" data-tab="markt"><span class="ic">📈</span><span class="tl">Markt</span></button>
     <button class="tab" data-tab="labor"><span class="ic">🔬</span><span class="tl">Labor</span></button>
+    <button class="tab" data-tab="handel"><span class="ic">🤝</span><span class="tl">Handel</span></button>
     <button class="tab" data-tab="konzern"><span class="ic">📊</span><span class="tl">Konzern</span></button>
   </div>
 
@@ -227,13 +232,13 @@
 <script>
 /* ============ KONFIGURATION ============ */
 const GOODS = {
-  weizen:   {name:"Weizen",   base:3,  ico:"🌾", demand:16, cogs:0.55},  // reiner Ackerbau
-  milch:    {name:"Milch",    base:5,  ico:"🥛", demand:13, cogs:0.80},  // Tierhaltung
-  stoff:    {name:"Stoff",    base:6,  ico:"🧵", demand:13, cogs:0.75},
-  mehl:     {name:"Mehl",     base:9,  ico:"🌾", demand:11, cogs:1.90},  // Weizen + Mühle
-  brot:     {name:"Brot",     base:28, ico:"🍞", demand:8,  cogs:5.20},  // Mehl + Bäckerei
-  kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7,  cogs:4.10},  // Milch + Käserei
-  kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6,  cogs:6.80},  // Stoff + Schneiderei
+  weizen:   {name:"Weizen",   base:3,  ico:"🌾", demand:16, cogs:0.55, perish:true,  season:[1.05,1.10,1.00,0.90]},
+  milch:    {name:"Milch",    base:5,  ico:"🥛", demand:13, cogs:0.80, perish:true,  season:[1.10,1.05,1.00,0.95]},
+  stoff:    {name:"Stoff",    base:6,  ico:"🧵", demand:13, cogs:0.75, perish:true,  season:[1.00,0.95,1.10,1.05]},
+  mehl:     {name:"Mehl",     base:9,  ico:"🌾", demand:11, cogs:1.90, perish:false, season:[1.00,1.05,1.05,1.00]},
+  brot:     {name:"Brot",     base:28, ico:"🍞", demand:8,  cogs:5.20, perish:false, season:[0.95,0.90,1.05,1.30]},
+  kaese:    {name:"Käse",     base:22, ico:"🧀", demand:7,  cogs:4.10, perish:false, season:[1.00,1.00,1.10,1.15]},
+  kleidung: {name:"Kleidung", base:35, ico:"👕", demand:6,  cogs:6.80, perish:false, season:[0.90,0.85,1.35,1.20]},
 };
 
 const BUILDINGS = {
@@ -252,21 +257,45 @@ const GOAL = 1000000;
 const SPEEDS = [1,2,4];
 const BASE_TICK = 2600;            // ms pro Tag bei 1× (vorher 1000) — Tage vergehen langsamer
 const CAP_BASE = 700, CAP_PER_LEVEL = 700; // Lagerkapazität je Ware, wächst mit der Stufe
+const SEASON_NAMES = ["Frühling","Sommer","Herbst","Winter"];
+const SEASON_ICO = ["🌱","☀️","🍂","❄️"];
+const SEASON_LEN = 30, YEAR_LEN = 120;
+const TAX_RATE = 0.25, QUARTER = 30;     // Steuer pro Quartal
+const AGRI = ["bauernhof","kuhstall","weberei"]; // wetterabhängige Betriebe
+const STOCKS = {
+  globex:  {name:"Globex Industrie", base:100},
+  helvet:  {name:"Helvetia Bank",    base:60},
+  novum:   {name:"Novum Energie",    base:145},
+};
 
 /* ============ ZUSTAND ============ */
 let S;
-function freshState(name){
+function freshState(name, prestige){
+  prestige = prestige||0;
   const prices = {};
   for(const g in GOODS) prices[g] = GOODS[g].base;
+  const stockP = {};
+  for(const s in STOCKS) stockP[s] = STOCKS[s].base;
   return {
     company: name || "Mein Kontor",
-    cash: 5000, day: 1, xp: 0, totalInvested: 0,
+    cash: Math.round(5000*(1+0.5*prestige)), day: 1, xp: 0, totalInvested: 0,
     buildings: {}, warehouse: {}, prices,
     running: true, speedIdx: 0, tab:"betrieb",
     log: [{day:1, t:"Kontor eröffnet. Baue deinen ersten Betrieb.", c:""}],
     won:false, bankrupt:false, cashHist:[5000],
     debt:0, auto:{}, netHist:[],
     sell:{}, q:{}, research:null, autoSell:{},
+    pop: Math.round(1000*(1+0.15*prestige)),  // Bevölkerung → Nachfrage
+    marketMult: 1,                            // Marktausbau
+    bLvl: {},                                 // Gebäude-Ausbaustufen
+    wage: 1.0, strikeDays: 0,                 // Löhne & Streik
+    qProfit: 0, lastTax: 0,                   // Steuer
+    stk: {}, stockP,                          // Aktien
+    contracts: [], contractOffer: null,       // Exportaufträge
+    reputation: 100,                          // Ruf (Schwarzmarkt)
+    weather: {type:'', factor:1, days:0},     // Wetter
+    pendingNews: [], demandBoost: {},         // Nachrichten mit Vorlauf
+    prestige: prestige,
   };
 }
 
@@ -280,13 +309,37 @@ function avgProfit(){ const h=S.cashHist; if(h.length<2) return 0; return (h[h.l
 function quality(g){ return S.q[g]||0; }
 function effRef(g){ return S.prices[g]*(1+0.12*quality(g)); }            // Q hebt den erzielbaren Preis
 function ensureOffer(g){ if(!S.sell[g]) S.sell[g]={price:Math.max(1,Math.round(effRef(g))), on:true}; return S.sell[g]; }
-function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(GOODS[g].demand*Math.min(4, r*r)); }
+/* --- Saison, Konjunktur, Bevölkerung --- */
+function season(){ return Math.floor((S.day % YEAR_LEN)/SEASON_LEN); }
+function seasonFactor(g){ const s=GOODS[g].season; return s?s[season()]:1; }
+function cycle(){ // Konjunkturzyklus ~100 Tage
+  const phase=Math.sin(2*Math.PI*S.day/100);
+  const factor=1+0.18*phase;
+  let name="Stabil";
+  if(phase>0.5) name="Hochkonjunktur"; else if(phase>0.05) name="Aufschwung";
+  else if(phase<-0.5) name="Rezession"; else if(phase<-0.05) name="Abschwung";
+  return {factor, name, phase};
+}
+function popFactor(){ return S.pop/1000; }
+function demandNow(g){
+  const boost=S.demandBoost[g]?S.demandBoost[g].factor:1;
+  return GOODS[g].demand * popFactor() * seasonFactor(g) * cycle().factor * boost * (S.marketMult||1);
+}
+/* --- Gebäude-Ausbau & Löhne --- */
+function bLvl(id){ return S.bLvl[id]||0; }
+function outMult(id){ return 1 + 0.25*bLvl(id); }                 // +25% Output je Stufe
+function upMult(id){ return Math.max(0.6, 1 - 0.06*bLvl(id)); }   // günstigerer Unterhalt je Stufe
+function cogsMult(id){ return Math.max(0.6, 1 - 0.05*bLvl(id)); } // günstigere Herstellung je Stufe
+function upgradeCost(id){ return Math.round(BUILDINGS[id].cost*1.6*Math.pow(1.8, bLvl(id)+1)); }
+function wageProd(){ return 0.7 + 0.3*S.wage; }                   // Wage 1.0 → 1.0 Produktivität
+function predictSales(g, price){ const er=effRef(g); if(price>=er*2) return 0; const r=er/price; return Math.round(demandNow(g)*Math.min(4, r*r)); }
 function researchCost(g){ return Math.round(GOODS[g].base*180*Math.pow(2.2, quality(g))); }
 function researchTime(g){ return Math.round(18*Math.pow(1.6, quality(g))); }  // in Tagen/Ticks
 function buildCost(id){ const owned=S.buildings[id]||0; return Math.round(BUILDINGS[id].cost*Math.pow(1.6,owned)); }
 function netWorth(){
   let n = S.cash + S.totalInvested*0.5 - (S.debt||0);
   for(const g in S.warehouse) n += (S.warehouse[g]||0)*S.prices[g];
+  for(const s in (S.stk||{})) n += (S.stk[s]||0)*(S.stockP[s]||0);
   return n;
 }
 function assetsValue(){ return netWorth() + (S.debt||0); }
@@ -310,40 +363,78 @@ function startLoop(){
 }
 function tick(){
   S.day++;
-  let upkeepTotal=0, overflow=false;
+  let upkeepTotal=0, cogsAll=0, overflow=false;
   const cap=capacity();
+  const wp=wageProd();
+  const onStrike = S.strikeDays>0;
 
-  // Produktion
-  for(const id in BUILDINGS){
-    const cnt = S.buildings[id]||0; if(!cnt) continue;
-    const b = BUILDINGS[id];
-    let active = cnt;
-    for(const inp in b.consumes){
-      const have = S.warehouse[inp]||0;
-      active = Math.min(active, Math.floor(have/b.consumes[inp]));
+  // Produktion (außer bei Streik)
+  if(!onStrike){
+    for(const id in BUILDINGS){
+      const cnt = S.buildings[id]||0; if(!cnt) continue;
+      const b = BUILDINGS[id];
+      let active = cnt;
+      for(const inp in b.consumes){
+        const have = S.warehouse[inp]||0;
+        active = Math.min(active, Math.floor(have/b.consumes[inp]));
+      }
+      if(active<=0){ upkeepTotal += b.upkeep*cnt*upMult(id)*S.wage*0.3; continue; } // Leerlauf-Grundkosten
+      for(const inp in b.consumes) S.warehouse[inp] -= b.consumes[inp]*active;
+      // Output-Faktoren: Ausbau × Produktivität × Wetter (nur Agrar)
+      let factor = outMult(id)*wp;
+      if(AGRI.includes(id) && S.weather.days>0) factor *= S.weather.factor;
+      let cogsTotal=0;
+      for(const out in b.produces){
+        const cur=S.warehouse[out]||0, add=Math.round(b.produces[out]*active*factor);
+        cogsTotal += GOODS[out].cogs * cogsMult(id) * add;
+        if(cur+add>cap){ S.warehouse[out]=cap; overflow=true; }
+        else S.warehouse[out]=cur+add;
+      }
+      upkeepTotal += b.upkeep*active*upMult(id)*S.wage;  // Lohnkosten skalieren mit Wage
+      cogsAll += cogsTotal;
     }
-    if(active<=0){ continue; }
-    for(const inp in b.consumes) S.warehouse[inp] -= b.consumes[inp]*active;
-    let cogsTotal=0;
-    for(const out in b.produces){
-      const cur=S.warehouse[out]||0, add=b.produces[out]*active;
-      cogsTotal += GOODS[out].cogs * add;
-      if(cur+add>cap){ S.warehouse[out]=cap; overflow=true; }
-      else S.warehouse[out]=cur+add;
-    }
-    upkeepTotal += b.upkeep*active + cogsTotal;
+  } else {
+    S.strikeDays--;
+    if(S.strikeDays===0) addLog("Streik beendet — die Produktion läuft wieder.","good");
   }
-  S.cash -= upkeepTotal;
-  if(overflow && S.day%6===0) addLog("Lager voll — Überschuss verfällt. Verkaufen oder Stufe steigen.","bad");
+  S.cash -= upkeepTotal + cogsAll;
+  if(overflow && S.day%6===0) addLog("Lager voll — Überschuss verfällt. Verkaufen oder ausbauen.","bad");
 
-  // Einzelhandelsverkauf nach Nachfrage-Elastizität + endogene Referenzpreise
-  retailTick();
+  // Streikrisiko bei zu niedrigen Löhnen
+  if(!onStrike && S.wage<0.85 && Math.random()<0.03*(0.85-S.wage)*10){
+    S.strikeDays=Math.ceil(2+Math.random()*4);
+    addLog(`Streik! Zu niedrige Löhne — ${S.strikeDays} Tage Produktionsausfall.`,"bad"); toast("✊ Streik!");
+  }
 
-  // Zufallsereignisse (Nachfrageschocks auf den Referenzpreis)
-  if(Math.random()<0.07){
+  // Verderb von Rohwaren
+  for(const g in GOODS){ if(GOODS[g].perish){ const h=S.warehouse[g]||0; if(h>20){ S.warehouse[g]=Math.floor(h*0.97); } } }
+
+  // Einzelhandelsverkauf nach Elastizität + endogene Referenzpreise
+  const dayRevenue = retailTick();
+
+  // Quartalsbilanz für Steuer
+  S.qProfit += dayRevenue - upkeepTotal - cogsAll;
+
+  // Exportaufträge erfüllen / Angebot erzeugen
+  contractsTick();
+
+  // Aktienkurse bewegen
+  for(const s in STOCKS){ const base=STOCKS[s].base; let p=S.stockP[s]; p+=(base-p)*0.015+base*0.03*(Math.random()*2-1); S.stockP[s]=Math.max(base*0.2,p); }
+
+  // Nachrichten mit Vorlauf abarbeiten
+  newsTick();
+
+  // Wetter
+  weatherTick();
+
+  // Bevölkerungswachstum (mehr bei Hochkonjunktur)
+  S.pop *= 1 + 0.0022*Math.max(0.3, cycle().factor);
+
+  // Zufalls-Preisschocks
+  if(Math.random()<0.05){
     const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
-    if(Math.random()<0.5){ S.prices[g]*=1.7;  addLog(`Nachfrageschub: ${GOODS[g].name} im Höhenflug.`,"good"); toast(`📈 ${GOODS[g].name} stark gefragt`);}
-    else{ S.prices[g]*=0.55; addLog(`Marktschwemme: ${GOODS[g].name} bricht ein.`,"bad");  toast(`📉 ${GOODS[g].name} eingebrochen`);}
+    if(Math.random()<0.5){ S.prices[g]*=1.6; }
+    else{ S.prices[g]*=0.6; }
     S.prices[g]=Math.max(GOODS[g].base*0.3,Math.min(GOODS[g].base*3.0,S.prices[g]));
   }
 
@@ -354,13 +445,22 @@ function tick(){
     S.research=null;
   }
 
+  // Steuer am Quartalsende
+  if(S.day % QUARTER === 0){
+    const afa = S.totalInvested*0.04;          // Abschreibung mindert Steuerlast
+    const taxable = Math.max(0, S.qProfit - afa);
+    const tax = Math.round(TAX_RATE*taxable);
+    if(tax>0){ S.cash-=tax; S.lastTax=tax; addLog(`Quartalssteuer fällig: ${eur(tax)} (25 % auf ${eur(taxable)} nach AfA).`,"bad"); }
+    else { S.lastTax=0; }
+    S.qProfit=0;
+  }
+
   // Kreditzinsen
   if(S.debt>0) S.debt += S.debt*0.0015;
 
-  // Insolvenz (Konzernwert tief negativ)
+  // Insolvenz / Sieg
   if(netWorth() < -15000 && !S.bankrupt){ S.bankrupt=true; S.running=false; clearInterval(loop); showOverlay("Insolvenz","Dein Konzern ist überschuldet. Die Gläubiger übernehmen das Ruder.","Neu gründen",()=>newGame()); }
-  // Sieg
-  if(!S.won && netWorth()>=GOAL){ S.won=true; addLog("Konzernwert über 1.000.000 € — Millionär!","good"); showOverlay("Millionär!","Dein Konzernwert hat die Million geknackt. Weiter geht's Richtung Milliarde.","Weiterspielen",()=>hideOverlay()); }
+  if(!S.won && netWorth()>=GOAL){ S.won=true; addLog("Konzernwert über 1.000.000 € — Millionär!","good"); showOverlay("Millionär!","Dein Konzernwert hat die Million geknackt. Du kannst weiterspielen oder im Konzern-Tab verkaufen (Exit) und mit Bonus neu starten.","Weiterspielen",()=>hideOverlay()); }
 
   S.cashHist.push(S.cash); if(S.cashHist.length>11) S.cashHist.shift();
   S.netHist.push(Math.round(netWorth())); if(S.netHist.length>60) S.netHist.shift();
@@ -368,36 +468,82 @@ function tick(){
   render();
 }
 function retailTick(){
+  let dayRevenue=0;
   for(const g in GOODS){
     const base=GOODS[g].base;
     let have=S.warehouse[g]||0;
     let off=S.sell[g];
-    if(!off && have>0) off=ensureOffer(g);   // neue Ware automatisch zum Verkauf anbieten
+    if(!off && have>0) off=ensureOffer(g);
     let soldVol=0;
     if(off && off.on && have>0){
       const want=predictSales(g, off.price);
       const sold=Math.min(want, have);
-      if(sold>0){
-        const rev=sold*off.price*0.9;        // 10 % Marktgebühr
-        S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; soldVol=sold;
-      }
+      if(sold>0){ const rev=sold*off.price*0.9; S.warehouse[g]-=sold; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol=sold; }
     }
-    // Auto-Verkauf bei Lagerschwelle: Abschlagsverkauf bei ≥ 70 % Lager voll
+    // Notverkauf bei vollem Lager
     const as=S.autoSell[g];
-    const cap2=CAP_BASE+(level()-1)*CAP_PER_LEVEL;
-    if(as && as.on && (S.warehouse[g]||0)>=cap2*0.70){
+    if(as && as.on && (S.warehouse[g]||0)>=capacity()*0.70){
       const dumpPrice=Math.round(effRef(g)*((100-(as.discount||20))/100));
       const dumpQty=S.warehouse[g]||0;
-      if(dumpQty>0 && dumpPrice>0){
-        const rev=dumpQty*dumpPrice*0.9;
-        S.warehouse[g]=0; S.cash+=rev; S.xp+=rev; soldVol+=dumpQty;
-      }
+      if(dumpQty>0 && dumpPrice>0){ const rev=dumpQty*dumpPrice*0.9; S.warehouse[g]=0; S.cash+=rev; S.xp+=rev; dayRevenue+=rev; soldVol+=dumpQty; }
     }
-    // Endogener Referenzpreis: Überangebot drückt, Knappheit hebt
+    // Endogener Referenzpreis
     let p=S.prices[g];
-    const pressure=(soldVol - GOODS[g].demand)*(base*0.004);
+    const pressure=(soldVol - demandNow(g))*(base*0.003);
     p += (base-p)*0.03 - pressure + base*0.015*(Math.random()*2-1);
     S.prices[g]=Math.max(base*0.3, Math.min(base*3.0, p));
+  }
+  return dayRevenue;
+}
+function contractsTick(){
+  // aktive Verträge erfüllen
+  for(const c of S.contracts){
+    if(c.done) continue;
+    const have=S.warehouse[c.good]||0;
+    const need=c.qty-c.filled;
+    const give=Math.min(have, need);
+    if(give>0){ S.warehouse[c.good]-=give; c.filled+=give; const rev=give*c.price; S.cash+=rev; S.xp+=rev; }
+    if(c.filled>=c.qty){ c.done=true; S.reputation=Math.min(100,S.reputation+4); addLog(`Auftrag erfüllt: ${c.qty}× ${GOODS[c.good].name} geliefert.`,"good"); }
+  }
+  // abgelaufene Verträge
+  for(const c of S.contracts){
+    if(!c.done && S.day>=c.deadline){ c.done=true; c.failed=true; S.reputation=Math.max(0,S.reputation-12); addLog(`Auftrag geplatzt: ${GOODS[c.good].name} nicht rechtzeitig geliefert. Ruf −12.`,"bad"); }
+  }
+  S.contracts = S.contracts.filter(c=>!c.done || (S.day - c.deadline) < 6);
+  // neues Angebot generieren
+  if(!S.contractOffer && S.contracts.filter(c=>!c.done).length<3 && Math.random()<0.06){
+    const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
+    const qty=Math.round((50+Math.random()*200)*popFactor());
+    const premium=1.05+Math.random()*0.25+(S.reputation/100)*0.1;
+    const price=+(effRef(g)*premium).toFixed(2);
+    const days=Math.round(12+Math.random()*14);
+    S.contractOffer={good:g, qty, price, days};
+  }
+}
+function newsTick(){
+  // fällige Nachrichten aktivieren
+  for(const n of S.pendingNews){ if(!n.fired && S.day>=n.day){ n.fired=true; S.demandBoost[n.good]={factor:n.factor, days:n.dur}; addLog(`${n.text} — jetzt aktiv.`, n.factor>=1?"good":"bad"); } }
+  S.pendingNews = S.pendingNews.filter(n=>!n.fired);
+  // Nachfrageboost abklingen
+  for(const g in S.demandBoost){ S.demandBoost[g].days--; if(S.demandBoost[g].days<=0) delete S.demandBoost[g]; }
+  // neue Vorab-Nachricht
+  if(S.pendingNews.length<2 && Math.random()<0.05){
+    const keys=Object.keys(GOODS); const g=keys[Math.floor(Math.random()*keys.length)];
+    const up=Math.random()<0.6;
+    const factor=up?1.4+Math.random()*0.4:0.6+Math.random()*0.2;
+    const lead=Math.round(3+Math.random()*3);
+    const dur=Math.round(8+Math.random()*8);
+    const text=up?`📰 Nachfrage nach ${GOODS[g].name} steigt in ${lead} Tagen`:`📰 Nachfrage nach ${GOODS[g].name} fällt in ${lead} Tagen`;
+    S.pendingNews.push({good:g, factor, day:S.day+lead, dur, text, fired:false});
+    addLog(text, up?"good":"bad");
+  }
+}
+function weatherTick(){
+  if(S.weather.days>0){ S.weather.days--; if(S.weather.days===0){ addLog(`Wetter normalisiert sich (${S.weather.type} vorbei).`,""); S.weather={type:'',factor:1,days:0}; } }
+  else if(Math.random()<0.02){
+    const dürre=Math.random()<0.5;
+    S.weather={type:dürre?"Dürre":"Frost", factor:dürre?0.6:0.45, days:Math.round(3+Math.random()*5)};
+    addLog(`${S.weather.type}! Agrarproduktion −${Math.round((1-S.weather.factor)*100)}% für ${S.weather.days} Tage.`,"bad"); toast(`${dürre?'🌵':'🥶'} ${S.weather.type}`);
   }
 }
 
@@ -454,6 +600,60 @@ function startResearch(g){
   addLog(`Forschung gestartet: ${GOODS[g].name} → Q${quality(g)+1} (${eur(c)}).`,"");
   render(); persist();
 }
+/* Marktausbau */
+function expansionCount(){ return Math.round(((S.marketMult||1)-1)/0.2); }
+function expandCost(){ return Math.round(15000*Math.pow(1.8, expansionCount())); }
+function expandMarket(){
+  const c=expandCost();
+  if(S.cash<c){ toast("Nicht genug Kapital."); return; }
+  S.cash-=c; S.marketMult=(S.marketMult||1)+0.2; S.pop*=1.05;
+  addLog(`Handelsnetz ausgebaut — Absatzmärkte +20 % (${eur(c)}).`,"good");
+  render(); persist();
+}
+/* Gebäude-Ausbau */
+function upgradeBuilding(id){
+  if((S.buildings[id]||0)<1){ toast("Erst bauen."); return; }
+  const c=upgradeCost(id);
+  if(S.cash<c){ toast("Nicht genug Kapital."); return; }
+  S.cash-=c; S.totalInvested+=c; S.bLvl[id]=bLvl(id)+1;
+  addLog(`${BUILDINGS[id].name} auf Stufe ${bLvl(id)} ausgebaut (${eur(c)}).`,"");
+  render(); persist();
+}
+/* Löhne */
+function adjWage(dir){ S.wage=Math.max(0.5, Math.min(2.0, +(S.wage+dir*0.1).toFixed(1))); render(); persist(); }
+/* Exportaufträge */
+function acceptContract(){
+  const o=S.contractOffer; if(!o) return;
+  S.contracts.push({good:o.good, qty:o.qty, price:o.price, filled:0, deadline:S.day+o.days, done:false});
+  addLog(`Auftrag angenommen: ${o.qty}× ${GOODS[o.good].name} bis Tag ${S.day+o.days} à ${o.price}€.`,"");
+  S.contractOffer=null; render(); persist();
+}
+function declineContract(){ S.contractOffer=null; render(); persist(); }
+/* Schwarzmarkt */
+function blackMarket(g){
+  const have=S.warehouse[g]||0; if(have<=0){ toast("Lager leer."); return; }
+  const gross=have*effRef(g); // keine Gebühr
+  if(Math.random()<0.18){ // erwischt
+    const fine=Math.round(gross*0.6); S.cash-=fine; S.reputation=Math.max(0,S.reputation-15);
+    S.warehouse[g]=0;
+    addLog(`Schwarzmarkt aufgeflogen! Strafe ${eur(fine)}, Ruf −15.`,"bad"); toast("🚔 Erwischt!");
+  } else {
+    S.cash+=gross; S.xp+=gross; S.reputation=Math.max(0,S.reputation-4); S.warehouse[g]=0;
+    addLog(`Schwarzmarkt: ${have}× ${GOODS[g].name} gebührenfrei für ${eur(gross)} verkauft.`,"good"); toast(`🤫 +${eur(gross)}`);
+  }
+  render(); persist();
+}
+/* Aktien */
+function buyStock(s,n){ const c=n*S.stockP[s]*1.01; if(S.cash<c){ toast("Nicht genug Kapital."); return; } S.cash-=c; S.stk[s]=(S.stk[s]||0)+n; render(); persist(); }
+function sellStock(s,n){ const have=S.stk[s]||0; n=Math.min(n,have); if(n<=0){ toast("Keine Anteile."); return; } S.cash+=n*S.stockP[s]*0.99; S.stk[s]-=n; render(); persist(); }
+/* Exit / Konzernverkauf */
+function exitValue(){ const annual=Math.max(0,avgProfit())*120; return Math.round(Math.max(netWorth(), netWorth()*0.5+annual*6)); }
+function sellCompany(){
+  if(netWorth()<GOAL){ toast("Erst ab 1.000.000 € Konzernwert."); return; }
+  const val=exitValue(), np=(S.prestige||0)+1, nm=S.company;
+  wipeSave();
+  showOverlay("Konzern verkauft!", `Verkaufserlös: ${eur(val)}. Du startest als Prestige-Stufe ${np} neu — mit mehr Startkapital und größerer Stadt.`, "Neu durchstarten", ()=>{ S=freshState(nm, np); hideOverlay(); $('c-speed').textContent="1×"; setPlay(true); render(); persist(); });
+}
 function setTab(t){ S.tab=t; document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t)); render(); }
 function setPlay(on){ S.running=on; $('c-play').classList.toggle('active',on); $('c-pause').classList.toggle('active',!on); startLoop(); }
 function cycleSpeed(){ S.speedIdx=(S.speedIdx+1)%SPEEDS.length; $('c-speed').textContent=SPEEDS[S.speedIdx]+"×"; startLoop(); }
@@ -488,7 +688,15 @@ function render(){
   if(S.tab==="betrieb") renderBetrieb();
   else if(S.tab==="markt") renderMarkt();
   else if(S.tab==="labor") renderLabor();
+  else if(S.tab==="handel") renderHandel();
   else renderKonzern();
+}
+function statusBanner(){
+  const c=cycle(), s=season();
+  let b=`<div class="banner"><span>${SEASON_ICO[s]} ${SEASON_NAMES[s]}</span><span>${c.phase>=0?'📈':'📉'} ${c.name}</span><span>👥 ${fmt(S.pop)}</span></div>`;
+  if(S.weather.days>0) b+=`<div class="banner warn">${S.weather.type==='Dürre'?'🌵':'🥶'} ${S.weather.type} aktiv — Agrar −${Math.round((1-S.weather.factor)*100)}% (${S.weather.days} T.)</div>`;
+  if(S.strikeDays>0) b+=`<div class="banner warn">✊ Streik — Produktion steht (${S.strikeDays} T.). Löhne erhöhen!</div>`;
+  return b;
 }
 
 function renderTicker(){
@@ -504,10 +712,16 @@ function renderTicker(){
 
 function renderBetrieb(){
   const lv=level();
-  let h="";
+  let h=statusBanner();
   if(Object.keys(S.buildings).length===0){
-    h+=`<div class="hint">Willkommen, Chef. Du startest mit <b>5.000 €</b>. Baue zuerst einen <b>Bauernhof</b> oder <b>Kuhstall</b>, um Rohwaren zu erzeugen — diese verkaufst du dann im <b>Markt</b>. Veredelte Waren (Brot, Käse, Kleidung) bringen deutlich mehr.</div>`;
+    h+=`<div class="hint">Willkommen, Chef. Du startest mit <b>${eur(S.cash)}</b>. Baue zuerst einen <b>Bauernhof</b> oder <b>Kuhstall</b>, um Rohwaren zu erzeugen — diese verkaufst du dann im <b>Markt</b>. Veredelte Waren bringen deutlich mehr.</div>`;
   }
+  // Lohn-Regler
+  h+=`<div class="card" style="margin-bottom:12px"><div class="row" style="justify-content:space-between">
+    <div><div class="name" style="font-size:14px">Löhne</div><div class="sub">Produktivität ${Math.round(wageProd()*100)}% · ${S.wage<0.85?'<span style="color:var(--loss)">Streikgefahr!</span>':'stabil'}</div></div>
+    <div class="autolim">Niveau <button data-wage="-1">−</button> <b>${S.wage.toFixed(1)}×</b> <button data-wage="1">+</button></div>
+  </div><div class="sub" style="margin-top:6px;font-size:11px">Höhere Löhne = mehr Output, aber teurer. Unter 0,9× drohen Streiks.</div></div>`;
+
   h+=`<div class="sect-title">Deine Betriebe</div>`;
   const owned=Object.keys(BUILDINGS).filter(id=>S.buildings[id]>0);
   if(owned.length===0){ h+=`<div class="sub" style="margin:0 2px 14px;color:var(--ink-soft)">Noch keine Betriebe.</div>`; }
@@ -523,12 +737,15 @@ function renderBetrieb(){
   }
   $('content').innerHTML=h;
   bindBuild();
+  document.querySelectorAll('[data-wage]').forEach(b=>b.onclick=()=>adjWage(parseInt(b.dataset.wage)));
+  document.querySelectorAll('[data-upg]').forEach(b=>b.onclick=()=>upgradeBuilding(b.dataset.upg));
 }
 
 function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
   const locked=lv<b.unlock;
   const cost=buildCost(id);
-  const prod=Object.entries(b.produces).map(([g,n])=>`${n}× ${GOODS[g].ico}${GOODS[g].name}`).join(", ");
+  const lvl=bLvl(id);
+  const prod=Object.entries(b.produces).map(([g,n])=>`${Math.round(n*outMult(id))}× ${GOODS[g].ico}${GOODS[g].name}`).join(", ");
   const cons=Object.keys(b.consumes).length?Object.entries(b.consumes).map(([g,n])=>`${n}× ${GOODS[g].name}`).join(", "):null;
   let chain="";
   if(cons) chain=`<div class="chain">${cons} <span class="arr">→</span> ${prod} · pro Tag</div>`;
@@ -538,8 +755,8 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
     <div class="row">
       <div class="ico">${b.ico}</div>
       <div class="grow">
-        <div class="name">${b.name}</div>
-        <div class="sub">Unterhalt ${b.upkeep}€/Tag${cnt>0?` · ${cnt} im Besitz`:''}</div>
+        <div class="name">${b.name}${lvl>0?` <span class="pill" style="background:var(--green-700);color:var(--paper)">Stufe ${lvl}</span>`:''}</div>
+        <div class="sub">Unterhalt ${Math.round(b.upkeep*upMult(id)*S.wage)}€/Tag${cnt>0?` · ${cnt} im Besitz`:''}</div>
       </div>
       ${showOwned?`<div class="owned">${cnt}</div>`:''}
     </div>
@@ -548,6 +765,7 @@ function buildingCard(id,b,cnt,lv,showOwned,buyMoreOnly){
       ? `<div class="btn btn-build" style="background:var(--paper-2);color:var(--loss);cursor:default">🔒 Ab Stufe ${b.unlock}</div>`
       : `<button class="btn btn-build" data-build="${id}" ${S.cash<cost?'disabled':''}>${cnt>0?'Weiteren bauen':'Bauen'}<span class="c">${eur(cost)}</span></button>`
     }
+    ${ (!locked && cnt>0) ? `<button class="btn btn-build" data-upg="${id}" ${S.cash<upgradeCost(id)?'disabled':''} style="margin-top:7px;background:var(--green-800)">⬆ Ausbauen → Stufe ${lvl+1} (+25% Output)<span class="c">${eur(upgradeCost(id))}</span></button>` : '' }
   </div>`;
 }
 
@@ -626,6 +844,66 @@ function renderLabor(){
   document.querySelectorAll('[data-research]').forEach(b=>b.onclick=()=>startResearch(b.dataset.research));
 }
 
+function renderHandel(){
+  let h=statusBanner();
+  // Marktausbau
+  h+=`<div class="sect-title">Handelsnetz</div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Absatz-Multiplikator</span><span class="price" style="color:var(--brass);font-size:15px">×${(S.marketMult||1).toFixed(1)}</span></div>
+    <div class="sub" style="margin-top:6px;font-size:11.5px">Erhöht dauerhaft die Nachfrage aller Waren und lässt die Stadt wachsen.</div>
+    <button class="btn btn-build" id="b-expand" ${S.cash<expandCost()?'disabled':''} style="margin-top:9px">Handelsnetz ausbauen (+20 %)<span class="c">${eur(expandCost())}</span></button>
+  </div>`;
+
+  // Exportaufträge
+  h+=`<div class="sect-title">Exportaufträge</div>`;
+  if(S.contractOffer){
+    const o=S.contractOffer;
+    h+=`<div class="card" style="border-color:var(--brass)">
+      <div class="row"><div class="ico">${GOODS[o.good].ico}</div><div class="grow"><div class="name" style="font-size:14px">Angebot: ${fmt(o.qty)}× ${GOODS[o.good].name}</div>
+      <div class="sub">${o.price.toFixed(2)} €/Stk · gebührenfrei · ${o.days} Tage Frist · Wert ${eur(o.qty*o.price)}</div></div></div>
+      <div class="trade"><button class="btn sell" id="c-accept">Annehmen</button><button class="btn buy" id="c-decline">Ablehnen</button></div>
+    </div>`;
+  } else {
+    h+=`<div class="sub" style="margin:0 2px 10px;color:var(--ink-soft)">Aktuell kein Angebot — es kommen regelmäßig neue herein.</div>`;
+  }
+  const active=S.contracts.filter(c=>!c.done);
+  for(const c of active){
+    const pct=Math.round(c.filled/c.qty*100);
+    h+=`<div class="card"><div class="row"><div class="ico" style="width:34px;height:34px;font-size:17px">${GOODS[c.good].ico}</div>
+      <div class="grow"><div class="name" style="font-size:13.5px">${GOODS[c.good].name}: ${fmt(c.filled)}/${fmt(c.qty)}</div>
+      <div class="sub">à ${c.price.toFixed(2)}€ · Frist Tag ${c.deadline} (noch ${Math.max(0,c.deadline-S.day)} T.)</div></div></div>
+      <div class="stockbar" style="margin-top:8px"><i style="width:${pct}%"></i></div></div>`;
+  }
+
+  // Schwarzmarkt
+  h+=`<div class="sect-title">Schwarzmarkt</div>
+  <div class="card"><div class="sub" style="font-size:11.5px;margin-bottom:9px">Verkauf <b>gebührenfrei</b> zum vollen Richtpreis — aber ${(18)}% Risiko, erwischt zu werden (Strafe + Rufverlust). Ruf aktuell: <b style="color:${S.reputation<50?'var(--loss)':'var(--ink)'}">${Math.round(S.reputation)}/100</b>.</div>`;
+  for(const g in GOODS){ const have=S.warehouse[g]||0; if(have<=0) continue;
+    h+=`<div class="row" style="justify-content:space-between;padding:5px 0"><span class="sub" style="font-size:12.5px">${GOODS[g].ico} ${GOODS[g].name} · ${fmt(have)} Stk (~${eur(have*effRef(g))})</span><button class="btn buy" data-bm="${g}" style="padding:6px 12px">Verkaufen</button></div>`;
+  }
+  h+=`</div>`;
+
+  // Aktien
+  h+=`<div class="sect-title">Börse</div>`;
+  for(const s in STOCKS){
+    const p=S.stockP[s], base=STOCKS[s].base, diff=(p/base-1)*100, cls=diff>=0?'up':'down', ar=diff>=0?'▲':'▼';
+    const have=S.stk[s]||0;
+    h+=`<div class="card"><div class="mk-head"><div class="row" style="gap:9px"><div class="ico" style="width:32px;height:32px;font-size:15px">📈</div>
+      <div><div class="name" style="font-size:13.5px">${STOCKS[s].name}</div><div class="sub">Bestand: ${fmt(have)} · Wert ${eur(have*p)}</div></div></div>
+      <div style="text-align:right"><div class="price">${p.toFixed(1)} €</div><div class="mk-trend ${cls}">${ar} ${Math.abs(diff).toFixed(0)}%</div></div></div>
+      <div class="trade"><button class="btn sell" data-stkb="${s}" data-n="1" ${S.cash<p?'disabled':''}>Kauf 1</button><button class="btn sell" data-stkb="${s}" data-n="10" ${S.cash<p*10?'disabled':''}>Kauf 10</button><button class="btn buy" data-stks="${s}" data-n="1" ${have<1?'disabled':''}>Verk. 1</button><button class="btn buy" data-stks="${s}" data-n="10" ${have<10?'disabled':''}>Verk. 10</button></div>
+    </div>`;
+  }
+
+  $('content').innerHTML=h;
+  $('b-expand') && ($('b-expand').onclick=expandMarket);
+  $('c-accept') && ($('c-accept').onclick=acceptContract);
+  $('c-decline') && ($('c-decline').onclick=declineContract);
+  document.querySelectorAll('[data-bm]').forEach(b=>b.onclick=()=>blackMarket(b.dataset.bm));
+  document.querySelectorAll('[data-stkb]').forEach(b=>b.onclick=()=>buyStock(b.dataset.stkb, parseInt(b.dataset.n)));
+  document.querySelectorAll('[data-stks]').forEach(b=>b.onclick=()=>sellStock(b.dataset.stks, parseInt(b.dataset.n)));
+}
+
 function renderKonzern(){
   const lv=level();
   let prod={}, upkeep=0;
@@ -633,7 +911,8 @@ function renderKonzern(){
     for(const o in BUILDINGS[id].produces) prod[o]=(prod[o]||0)+BUILDINGS[id].produces[o]*c; }
   const totalB=Object.values(S.buildings).reduce((a,b)=>a+b,0);
 
-  let h=`<div class="sect-title">Übersicht</div>
+  let h=statusBanner();
+  h+=`<div class="sect-title">Übersicht</div>
   <div class="card">
     <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Konzernwert</span><span class="price" style="color:var(--brass)">${eur(netWorth())}</span></div>
     <div class="row" style="justify-content:space-between;margin-top:6px"><span class="sub" style="font-size:13px">Ziel: Millionär</span><span class="pill">${Math.min(100,Math.round(netWorth()/GOAL*100))}%</span></div>
@@ -660,6 +939,16 @@ function renderKonzern(){
     </div>
   </div>`;
 
+  h+=`<div class="sect-title">Finanzamt & Exit</div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><span class="sub" style="font-size:13px">Quartalsgewinn (laufend)</span><span class="price" style="font-size:14px;color:${S.qProfit>=0?'var(--gain)':'var(--loss)'}">${S.qProfit>=0?'+':'−'}${eur(Math.abs(S.qProfit))}</span></div>
+    <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Letzte Steuer</span><span class="price" style="font-size:14px;color:var(--loss)">${eur(S.lastTax||0)}</span></div>
+    <div class="row" style="justify-content:space-between;margin-top:4px"><span class="sub" style="font-size:13px">Prestige-Stufe</span><span class="pill">${S.prestige||0}</span></div>
+    <div class="sub" style="margin-top:7px;font-size:11px">25 % Steuer pro Quartal auf den Gewinn nach Abschreibung (AfA 4 % der Investitionen).</div>
+    <button class="btn btn-build" id="b-exit" ${netWorth()<GOAL?'disabled':''} style="margin-top:9px;background:var(--brass);color:var(--green-900)">💼 Konzern verkaufen (Exit) — ${eur(exitValue())}</button>
+    <div class="sub" style="margin-top:5px;font-size:11px">${netWorth()<GOAL?'Ab 1.000.000 € Konzernwert möglich.':'Verkaufen und mit Prestige-Bonus neu starten.'}</div>
+  </div>`;
+
   h+=`<div class="sect-title">Ereignisse</div><div class="card log">`;
   for(const e of S.log.slice(0,14)) h+=`<div class="e ${e.c}"><span class="d">T${fmt(e.day)}</span><span class="t">${e.t}</span></div>`;
   h+=`</div>`;
@@ -680,6 +969,7 @@ function renderKonzern(){
   $('b-new').onclick=()=>{ if(confirm("Neues Spiel starten? Der aktuelle Fortschritt geht verloren.")) newGame(); };
   document.querySelectorAll('[data-loan]').forEach(b=>b.onclick=()=>takeLoan(parseInt(b.dataset.loan)));
   document.querySelectorAll('[data-repay]').forEach(b=>b.onclick=()=>repayLoan(b.dataset.repay==='all'?(S.debt||0):parseInt(b.dataset.repay)));
+  $('b-exit') && ($('b-exit').onclick=()=>{ if(confirm("Konzern verkaufen und mit Prestige-Bonus neu starten?")) sellCompany(); });
 }
 
 /* ============ BINDINGS ============ */
